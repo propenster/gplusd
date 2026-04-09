@@ -1,3 +1,4 @@
+#adapted from deepromoter,
 import itertools
 import random
 
