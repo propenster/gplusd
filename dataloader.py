@@ -3,7 +3,6 @@ import random
 import numpy as np
 from sklearn import utils
 import torch
-import torch.utils.data as data
 from torch.utils.data import Dataset, DataLoader, random_split, ConcatDataset
 from utils import reader, get_list_kmer, protein2num, neggen
 
@@ -16,27 +15,31 @@ def load_dataset(path, train_size=0.8, rand_neg=False, batch_size=32, num_cpu=4,
     # Return the training and testing datasets as PyTorch DataLoader objects
     manual_seed = torch.Generator().manual_seed(42)
     positive_samples = LoadEncoded(path, device=device)
-    negative_samples = LoadEncoded(path, is_positive=False, test=2, device=device)
+    negative_samples = LoadEncoded(path, is_positive=False, fake=2, device=device)
 
     train_num = int(len(positive_samples) * train_size)
     val_num = int(len(positive_samples) * (1 - train_size)*0.5)
     split_size = [train_num, val_num, len(positive_samples) - train_num - val_num]
-    train_pos, val_pos, test_pos = torch.utils.data.random_split(positive_samples, split_size, generator=manual_seed)
-    train_neg, val_neg, test_neg = torch.utils.data.random_split(negative_samples, split_size, generator=manual_seed)
+    train_pos, val_pos, test_pos = random_split(positive_samples, split_size, generator=manual_seed)
+    train_neg, val_neg, test_neg = random_split(negative_samples, split_size, generator=manual_seed)
 
     if rand_neg:
-        negative_data_rand = LoadEncoded(path, is_positive=False, test=1, device=device)
+        negative_data_rand = LoadEncoded(path, is_positive=False, fake=1, device=device)
         train_neg = ConcatDataset([train_neg, negative_data_rand])
     
     stack_datasets = [train_pos, val_pos, test_pos, train_neg, val_neg, test_neg]
-    stack_loaders = [data.DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=num_cpu) for dataset in stack_datasets]
+    stack_loaders = [DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=num_cpu) for dataset in stack_datasets]
 
     return stack_loaders
 
 
-class LoadEncoded(data.Dataset):
-    def __init__(self, pathpos, is_pos=True, device="cuda", fake=0, length_pro=300, divide=20, part=8):
-        if is_pos and fake != 0:
+def load_data_test(path, batch_size=32, num_cpu=4, device="cuda"):
+    dataset = LoadEncoded(path, device=device)
+    return DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=num_cpu)
+
+class LoadEncoded(Dataset):
+    def __init__(self, pathpos, is_positive=True, device="cuda", fake=0, length_pro=81, divide=5, part=2):
+        if is_positive and fake != 0:
             raise Exception("Cant use key word fake on positive dataset")
         self.device = device
         self.fake = fake
@@ -53,7 +56,7 @@ class LoadEncoded(data.Dataset):
         # convert protein to number sequence
         self.npos = [protein2num(pro, dic) for pro in self.dpos]
 
-        if is_pos:
+        if is_positive:
             self.poslabel = torch.from_numpy(np.ones(len(self.dpos)))
         else:
             # ic("go false")

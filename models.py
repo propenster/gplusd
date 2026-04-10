@@ -30,7 +30,7 @@ class BidirectionalLSTM(nn.Module):
 
 
 class GPlusD(nn.Module):
-    def __init__(self, para_ker, input_shape=(64, 300, 4), pool_kernel=6, drop=0.5):
+    def __init__(self, para_ker, input_shape=(64, 81, 4), pool_kernel=6, drop=0.5):
         super().__init__()
         binode = len(para_ker) * 4
 

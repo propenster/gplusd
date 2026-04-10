@@ -13,15 +13,15 @@ from test import evaluate, mcc
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
-def train(data_path, pretrain=None, exp_name="test", training=True, ker=None, epoch_num=1000):
+def train(data_path, pretrain=None, outputdir="test", training=True, ker=None, epoch_num=1000):
     ker = ker or [27, 14, 7]
 
     # Create experiment folders
-    exp_folder = Path(f"./output/{exp_name}")
+    exp_folder = Path(f"./output/{outputdir}")
     exp_folder.mkdir(parents=True, exist_ok=True)
 
     ic("Data loading")
-    train_pos, val_pos, test_pos, train_neg, val_neg, test_neg = load_data(data_path, device=device)
+    train_pos, val_pos, test_pos, train_neg, val_neg, test_neg = load_dataset(data_path, device=device)
 
     net = GPlusD(ker).to(device)
     if pretrain:
@@ -58,7 +58,7 @@ def train(data_path, pretrain=None, exp_name="test", training=True, ker=None, ep
                     eval_data, _ = evaluate(net, [val_pos, val_neg])
                     precision, recall, MCC = mcc(eval_data)
 
-                ic(epoch, exp_name, precision, recall, MCC)
+                ic(epoch, outputdir, precision, recall, MCC)
 
                 # Save best models
                 if precision > best_precision:
@@ -103,7 +103,7 @@ def train(data_path, pretrain=None, exp_name="test", training=True, ker=None, ep
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument("-d", "--data", type=str, required=True, help="path to dataset(txt file)")
-    parser.add_argument("-o", "--output", type=str, default="test", help="name of folder to save output in ./output")
+    parser.add_argument("-o", "--outputdir", type=str, default="test", help="name of folder to save output in ./output")
     parser.add_argument("-w", "--weight", type=str, help="Path to pre-train")
     parser.add_argument("--test", action="store_true", help="Add this flag to do test only")
     args = parser.parse_args()
@@ -111,6 +111,6 @@ if __name__ == '__main__':
     train(
         data_path=args.data, 
         pretrain=args.weight, 
-        exp_name=args.experiment_name, 
+        outputdir=args.outputdir, 
         training=not args.test
     )
