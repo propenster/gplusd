@@ -6,7 +6,7 @@ import torch.optim as optim
 from torch import nn
 from icecream import ic
 
-from dataloader import load_data
+from dataloader import load_dataset
 from models import GPlusD
 from test import evaluate, mcc
 
