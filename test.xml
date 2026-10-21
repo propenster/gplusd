@@ -1,0 +1,167 @@
+<mxfile version="21.6.8">
+  <diagram name="GPlusD Architecture">
+    <mxGraphModel dx="1200" dy="800" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1169" pageHeight="827" background="#ffffff">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        
+        <!-- Input Text -->
+        <mxCell id="txt_in" value="Input sequence (81 bp)" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;rotation=-90;fontSize=14;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="0" y="250" width="180" height="30" as="geometry" />
+        </mxCell>
+        
+        <!-- Input Channels (Pseudo 3D) -->
+        <mxCell id="in_t" value="T" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;align=center;verticalAlign=top;spacingTop=5;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="115" y="100" width="40" height="300" as="geometry" />
+        </mxCell>
+        <mxCell id="in_g" value="G" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;align=center;verticalAlign=top;spacingTop=5;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="100" y="115" width="40" height="300" as="geometry" />
+        </mxCell>
+        <mxCell id="in_c" value="C" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;align=center;verticalAlign=top;spacingTop=5;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="85" y="130" width="40" height="300" as="geometry" />
+        </mxCell>
+        <mxCell id="in_a" value="A" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;align=center;verticalAlign=top;spacingTop=5;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="70" y="145" width="40" height="300" as="geometry" />
+        </mxCell>
+
+        <!-- Bounding Box for Conv & Pool -->
+        <mxCell id="box_conv" value="1D Convolutional + ReLU (128 Filters, k=15)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#333333;dashed=1;align=center;verticalAlign=top;spacingTop=10;fontSize=12;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="240" y="145" width="230" height="200" as="geometry" />
+        </mxCell>
+
+        <!-- Conv Tensors -->
+        <mxCell id="conv_1" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#b1ddf0;strokeColor=#10739e;" vertex="1" parent="1">
+          <mxGeometry x="300" y="200" width="20" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="conv_2" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#b1ddf0;strokeColor=#10739e;" vertex="1" parent="1">
+          <mxGeometry x="290" y="205" width="20" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="conv_3" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#b1ddf0;strokeColor=#10739e;" vertex="1" parent="1">
+          <mxGeometry x="280" y="210" width="20" height="100" as="geometry" />
+        </mxCell>
+
+        <!-- Pool Tensors -->
+        <mxCell id="txt_pool" value="Max Pooling (Size 5)" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=12;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="350" y="280" width="120" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="pool_1" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffcccc;strokeColor=#36393d;" vertex="1" parent="1">
+          <mxGeometry x="410" y="215" width="15" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="pool_2" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffcccc;strokeColor=#36393d;" vertex="1" parent="1">
+          <mxGeometry x="400" y="220" width="15" height="70" as="geometry" />
+        </mxCell>
+
+        <!-- Arrows inside box -->
+        <mxCell id="arr_c2p" value="" style="endArrow=classic;html=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="conv_1" target="pool_2">
+          <mxGeometry width="50" height="50" relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Connection from Input to Conv -->
+        <mxCell id="line_1" value="" style="endArrow=none;html=1;dashed=1;exitX=1;exitY=0.25;entryX=0;entryY=0;" edge="1" parent="1" source="in_a" target="conv_3">
+          <mxGeometry width="50" height="50" relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="line_2" value="" style="endArrow=none;html=1;dashed=1;exitX=1;exitY=0.75;entryX=0;entryY=1;" edge="1" parent="1" source="in_a" target="conv_3">
+          <mxGeometry width="50" height="50" relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- BiLSTM Label -->
+        <mxCell id="txt_lstm" value="Bidirectional LSTM&lt;br&gt;(32 Units, Drop=0.5)" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=12;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="500" y="340" width="140" height="40" as="geometry" />
+        </mxCell>
+
+        <!-- BiLSTM Nodes -->
+        <mxCell id="lstm_1" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry x="540" y="170" width="60" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="lstm_2" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry x="540" y="230" width="60" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="lstm_3" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry x="540" y="290" width="60" height="30" as="geometry" />
+        </mxCell>
+        
+        <!-- Lines between LSTM nodes -->
+        <mxCell id="l_lstm_up" value="" style="endArrow=classic;startArrow=classic;html=1;exitX=0.5;exitY=0;entryX=0.5;entryY=1;" edge="1" parent="1" source="lstm_2" target="lstm_1">
+          <mxGeometry width="50" height="50" relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="l_lstm_dn" value="" style="endArrow=classic;startArrow=classic;html=1;exitX=0.5;exitY=0;entryX=0.5;entryY=1;" edge="1" parent="1" source="lstm_3" target="lstm_2">
+          <mxGeometry width="50" height="50" relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Lines to LSTM -->
+        <mxCell id="l_pool_lstm" value="Sequence" style="endArrow=classic;html=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="box_conv" target="lstm_2">
+          <mxGeometry width="50" height="50" relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Dense / Flatten Layer Box -->
+        <mxCell id="flatten" value="Flatten" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;align=center;verticalAlign=middle;rotation=-90;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="610" y="235" width="120" height="20" as="geometry" />
+        </mxCell>
+
+        <!-- Lines from LSTM to Flatten -->
+        <mxCell id="l_lstm_flat1" value="" style="endArrow=classic;html=1;exitX=1;exitY=0.5;entryX=0.5;entryY=1;" edge="1" parent="1" source="lstm_1" target="flatten">
+          <mxGeometry width="50" height="50" relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="l_lstm_flat2" value="" style="endArrow=classic;html=1;exitX=1;exitY=0.5;entryX=0.5;entryY=0.5;" edge="1" parent="1" source="lstm_2" target="flatten">
+          <mxGeometry width="50" height="50" relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="l_lstm_flat3" value="" style="endArrow=classic;html=1;exitX=1;exitY=0.5;entryX=0.5;entryY=0;" edge="1" parent="1" source="lstm_3" target="flatten">
+          <mxGeometry width="50" height="50" relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Dense Nodes -->
+        <mxCell id="d_1" value="" style="ellipse;whiteSpace=wrap;html=1;aspect=fixed;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="750" y="150" width="30" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="d_2" value="" style="ellipse;whiteSpace=wrap;html=1;aspect=fixed;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="750" y="200" width="30" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="d_3" value=".." style="ellipse;whiteSpace=wrap;html=1;aspect=fixed;fillColor=none;strokeColor=none;align=center;verticalAlign=top;fontSize=18;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="750" y="240" width="30" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="d_4" value="" style="ellipse;whiteSpace=wrap;html=1;aspect=fixed;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="750" y="290" width="30" height="30" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="txt_dense" value="Fully Connected&lt;br&gt;(64 Units)" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=12;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="705" y="340" width="120" height="30" as="geometry" />
+        </mxCell>
+
+        <!-- Fully Connected Lines (Crisscross pattern) -->
+        <mxCell id="fc_1" value="" style="endArrow=none;html=1;exitX=0.5;exitY=0;entryX=0;entryY=0.5;" edge="1" parent="1" source="flatten" target="d_1">
+          <mxGeometry width="50" height="50" relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="fc_2" value="" style="endArrow=none;html=1;exitX=0.5;exitY=0.33;entryX=0;entryY=0.5;" edge="1" parent="1" source="flatten" target="d_2">
+          <mxGeometry width="50" height="50" relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="fc_3" value="" style="endArrow=none;html=1;exitX=0.5;exitY=1;entryX=0;entryY=0.5;" edge="1" parent="1" source="flatten" target="d_4">
+          <mxGeometry width="50" height="50" relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="fc_4" value="" style="endArrow=none;html=1;exitX=0.5;exitY=0;entryX=0;entryY=0.5;" edge="1" parent="1" source="flatten" target="d_2">
+          <mxGeometry width="50" height="50" relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="fc_5" value="" style="endArrow=none;html=1;exitX=0.5;exitY=1;entryX=0;entryY=0.5;" edge="1" parent="1" source="flatten" target="d_2">
+          <mxGeometry width="50" height="50" relative="1" as="geometry" />
+        </mxCell>
+        
+        <!-- Output Node -->
+        <mxCell id="out_node" value="" style="ellipse;whiteSpace=wrap;html=1;aspect=fixed;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="870" y="215" width="40" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="txt_out" value="Output&lt;br&gt;(Sigmoid)" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=12;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="855" y="260" width="70" height="30" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="out_l1" value="" style="endArrow=classic;html=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="d_1" target="out_node">
+          <mxGeometry width="50" height="50" relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="out_l2" value="" style="endArrow=classic;html=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="d_2" target="out_node">
+          <mxGeometry width="50" height="50" relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="out_l3" value="" style="endArrow=classic;html=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="d_4" target="out_node">
+          <mxGeometry width="50" height="50" relative="1" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

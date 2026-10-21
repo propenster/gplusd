@@ -121,3 +121,79 @@ The datasets used to train and validate GPlusD were sourced from the Prokaryotic
   publisher={Frontiers Media SA}
 }
 ```
+
+
+
+python train_lgbm.py --data "data/prokaryote_promoters.txt" --output-dir output
+python evaluate_external.py --pos data/external_gplus_promoters.txt --neg data/external_gplus_background.txt --model-dir output
+prepare_external_benchmark_data.py
+python generate_paper_figures.py --model-dir output
+python generate_shap_plots.py --model-dir output
+
+
+# new flow
+python generate_aei_negatives.py --input data/prokaryote_promoters.txt --output data/prokaryote_promoters_negative.txt 
+python train_lgbm.py --data "data/prokaryote_promoters.txt" --output-dir output --model-prefix gplus
+python prepare_external_benchmark_data.py
+python evaluate_external.py --pos data/dbtbs_positives.txt --neg data/dbtbs_negatives.txt --model-dir output --model-prefix gplus
+python generate_paper_figures.py \
+    --ext-pos data/dbtbs_positives.txt \
+    --ext-neg data/dbtbs_negatives.txt \
+    --train-pos data/gplus.txt \
+    --train-neg data/gplus_negative.txt \
+    --model-dir output
+    --model-prefix gplus
+  
+python generate_shap_plots.py --pos data/dbtbs_positives.txt --neg data/dbtbs_negatives.txt --model-dir output --model-prefix gplus
+
+
+
+# 1. Generate new negatives with k=5
+python generate_aei_negatives.py --input data/gplus.txt --output data/gplus_negative_k5.txt -k 5
+
+# 2. Train a new model on this k=5 dataset
+python train_lgbm.py --data "data/gplus.txt" --output-dir output_k5
+
+# 3. Evaluate the new model (you will need to point to the new output_k5 folder)
+python evaluate_external.py --pos data/dbtbs_positives.txt --neg data/dbtbs_negatives.txt --model-dir output_k5
+
+
+
+# paper flow../.
+
+
+python generate_aei_negatives.py --input data/gplus.txt --output data/gplus_negative_k5.txt -k 5
+python train_lgbm.py --data "data/gplus.txt" --output-dir output_k5 
+python prepare_external_benchmark_data.py
+python evaluate_external.py --pos data/dbtbs_positives.txt --neg data/dbtbs_negatives.txt --model-dir output_k5
+python generate_paper_figures2.py \
+    --ext-pos data/dbtbs_positives.txt \
+    --ext-neg data/dbtbs_negatives.txt \
+    --train-pos data/gplus.txt \
+    --train-neg data/gplus_negative.txt \
+    --model-dir output_k5  
+python generate_shap_plots.py --pos data/dbtbs_positives.txt --neg data/dbtbs_negatives.txt --model-dir output_k5
+python run_sota_comparison.py --train-pos data/gplus.txt --train-neg-std data/gplus_negative.txt --train-neg-aei data/gplus_negative_k5.txt --test-pos data/dbtbs_positives.txt --test-neg data/dbtbs_negatives.txt
+
+
+
+# the name of my model is GPlusD which is dumb but we'll make it better once we're ready to publich preprint to bioarxiv
+python generate_aei_negatives.py --input data/gplusd_positive.txt --output data/gplusd_negative.txt -k 5
+python train_cnn_bilstm.py --data "data/gplusd_positive.txt" --output-dir models/aei_cnn 
+python prepare_external_benchmark_data.py --pos-out data/cnnprom_positive.txt --neg-out data/cnnprom_negative.txt
+python evaluate_external.py --pos data/cnnprom_positive.txt --neg data/cnnprom_negative.txt --model-dir output
+python generate_paper_figures2.py \
+    --ext-pos data/cnnprom_positive.txt \
+    --ext-neg data/cnnprom_negative.txt \
+    --train-pos data/gplusd_positive.txt \
+    --train-neg data/gplusd_negative.txt \
+    --model-dir output  
+python generate_shap_plots.py --pos data/cnnprom_positive.txt --neg data/cnnprom_negative.txt --model-dir output
+python run_sota_comparison.py --train-pos data/gplusd_positive.txt --train-neg-std data/gplusd_negative.txt --train-neg-aei data/gplusd_negative.txt --test-pos data/cnnprom_positives.txt --test-neg data/cnnprom_negatives.txt
+
+
+KMP_DUPLICATE_LIB_OK=TRUE python evaluate_sigma_factors.py \
+  --fasta dbtbs_benchmark.fasta \
+  --neg data/dbtbs_negatives.txt \
+  --model-dir models/aei_cnn \
+  --out-dir figs

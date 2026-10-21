@@ -1,0 +1,18 @@
+python run_sota_comparison.py --train-pos data/gplus.txt --train-neg-std data/gplus_negative.txt --train-neg-aei data/gplus_negative_k5.txt --test-pos data/dbtbs_positives.txt --test-neg data/dbtbs_negatives.txt
+Training AEI-LightGBM...
+Training AEI-CNN+BiLSTM...
+Training XGBoost (Standard Negatives)...
+Training SVC (Standard Negatives)...
+Training Standard-CNN+BiLSTM...
+
+================================================================================
+ULTIMATE SOTA COMPARISON METRICS (DBTBS BENCHMARK)
+================================================================================
+              Model  Precision  Recall   MCC   AUC
+       AEI-LightGBM      0.728   0.660 0.415 0.761
+     AEI-CNN+BiLSTM      0.831   0.804 0.641 0.894
+   Standard-XGBoost      0.754   0.641 0.437 0.765
+ Standard-SVC (RBF)      0.635   0.512 0.221 0.643
+Standard-CNN+BiLSTM      0.829   0.818 0.649 0.884
+================================================================================
+(base) genvax@Genvaxs-MacBook-Air-3 gplusd % 

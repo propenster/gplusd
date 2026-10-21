@@ -1,0 +1,2764 @@
+data_merger.py
+from pathlib import Path
+import pandas as pd
+
+def extract_sequences(species_list, folder_name, output_file):
+    # Ensure the output directory exists
+    Path(output_file).parent.mkdir(parents=True, exist_ok=True)
+    search_path = Path(f"data/{folder_name}")
+    
+    if not search_path.exists():
+        print(f"Directory not found: {search_path}")
+        return
+
+    with open(output_file, "w") as f:
+        for spp in species_list:            
+            files_found = list(search_path.glob(f"*{spp}*.csv"))
+            for file in files_found:
+                df = pd.read_csv(file)
+                sequences = df["PromoterSeq"].dropna().astype(str)
+                for pro in sequences:
+                    f.write(f"{pro.upper()}\n")
+if __name__ == "__main__":
+    gplus = [
+        "Bacillus subtilis subsp. subtilis str. 168",
+        "Staphylococcus aureus MW2", 
+        "Staphylococcus epidermidis ATCC 12228",
+        "Streptococcus pyogenes strain S119", 
+        "Corynebacterium diphtheriae NCTC 13129", 
+        "Corynebacterium glutamicum ATCC 13032", 
+        "Paenibacillus riograndensis SBR5"
+    ]
+
+    gminus = [
+        "Acinetobacter baumannii ATCC 17978",
+        "Agrobacterium tumefaciens str C58",
+        "Bradyrhizobium japonicum USDA 110", 
+        "Burkholderia cenocepacia J2315", 
+        "Campylobacter jejuni 81-176", 
+        "Campylobacter jejuni 81116", 
+        "Campylobacter jejuni NCTC11168", 
+        "Campylobacter jejuni RM1221", 
+        "Escherichia coli str K-12 substr. MG1655",
+        "Helicobacter pylori strain 26695", 
+        "Klebsiella aerogenes KCTC 2190", 
+        "Nostoc sp. PCC7120", 
+        "Onion yellows phytoplasma OY-M", 
+        "Pseudomonas putida strain KT2440", 
+        "Shigella flexneri 5a str. M90T", 
+        "Sinorhizobium meliloti 1021", 
+        "Synechococcus elongatus PCC 7942", 
+        "Synechocystis sp. PCC 6803", 
+        "Xanthomonas campestris pv. campestris B100"
+    ]
+    
+    print("Processing Gram-positive bacteria...")
+    extract_sequences(gplus, "gplus", "./data/gplus.txt")
+    
+    print("\nProcessing Gram-negative bacteria...")
+    extract_sequences(gminus, "gminus", "./data/gminus.txt")
+    
+
+
+dataloader.py
+import random
+
+import numpy as np
+from sklearn import utils
+import torch
+from torch.utils.data import Dataset, DataLoader, random_split, ConcatDataset
+from utils import reader, get_list_kmer, protein2num, neggen
+
+
+
+def load_dataset(path, train_size=0.8, rand_neg=False, batch_size=32, num_cpu=4, device="cuda"):
+    # Load the dataset from the given path
+    # Split into training and testing sets based on train_size
+    # If rand_neg is True, generate random negative samples
+    # Return the training and testing datasets as PyTorch DataLoader objects
+    manual_seed = torch.Generator().manual_seed(42)
+    positive_samples = LoadEncoded(path, device=device)
+    negative_samples = LoadEncoded(path, is_positive=False, fake=2, device=device)
+
+    train_num = int(len(positive_samples) * train_size)
+    val_num = int(len(positive_samples) * (1 - train_size)*0.5)
+    split_size = [train_num, val_num, len(positive_samples) - train_num - val_num]
+    train_pos, val_pos, test_pos = random_split(positive_samples, split_size, generator=manual_seed)
+    train_neg, val_neg, test_neg = random_split(negative_samples, split_size, generator=manual_seed)
+
+    if rand_neg:
+        negative_data_rand = LoadEncoded(path, is_positive=False, fake=1, device=device)
+        train_neg = ConcatDataset([train_neg, negative_data_rand])
+    
+    stack_datasets = [train_pos, val_pos, test_pos, train_neg, val_neg, test_neg]
+    stack_loaders = [DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=num_cpu) for dataset in stack_datasets]
+
+    return stack_loaders
+
+
+def load_data_test(path, batch_size=32, num_cpu=4, device="cuda"):
+    dataset = LoadEncoded(path, device=device)
+    return DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=num_cpu)
+
+class LoadEncoded(Dataset):
+    def __init__(self, pathpos, is_positive=True, device="cuda", fake=0, length_pro=81, divide=5, part=2):
+        if is_positive and fake != 0:
+            raise Exception("Cant use key word fake on positive dataset")
+        self.device = device
+        self.fake = fake
+        self.length_pro = length_pro
+        self.divide = divide
+        self.part = part
+
+        # get list of kmer
+        dic = get_list_kmer(1)
+
+        # read data from file
+        self.dpos = reader(pathpos)
+
+        # convert protein to number sequence
+        self.npos = [protein2num(pro, dic) for pro in self.dpos]
+
+        if is_positive:
+            self.poslabel = torch.from_numpy(np.ones(len(self.dpos)))
+        else:
+            # ic("go false")
+            self.poslabel = torch.from_numpy(np.zeros(len(self.dpos)))
+        self.poslabel = self.poslabel.to(device)
+
+    def __len__(self):
+        return len(self.dpos)
+
+    def __getitem__(self, idx):
+        # convert data to one hot format and up to device
+        pro = self.npos[idx]
+        if len(pro) < self.length_pro:
+            pro = pro + [0] * (self.length_pro - len(pro))
+        elif len(pro) > self.length_pro:
+            pro = pro[:self.length_pro]
+
+        # random generate a fake promoter by shuffle the pro
+        if self.fake == 1:
+            pro = random.shuffle(pro)
+        # random generate a fake promoter by replace part of pro
+        elif self.fake == 2:
+            pro = neggen(pro, num_part=self.divide, keep=self.part, max_class=4)
+
+        torchpro = torch.from_numpy(np.array(pro))
+        onehot = torch.nn.functional.one_hot(torchpro, num_classes=4).to(self.device)
+        return onehot.float(), self.poslabel[idx]
+
+dataset_builder.py
+import numpy as np
+import pandas as pd
+from generate_negative_sequences import generate_adversarial_negative
+
+def extract_promoter_features(sequence, window_size=10):
+    """
+    Extracts tabular features that survive De Bruijn scrambling:
+    1. Positional One-Hot 
+    2. Local GC-Skew
+    3. Thermodynamic Stability Proxy
+    """
+    sequence = sequence.upper()
+    seq_len = len(sequence)
+    features = {}
+    
+    # 1. Positional One-Hot Encoding
+    mapping = {'A': [1,0,0,0], 'C': [0,1,0,0], 'G': [0,0,1,0], 'T': [0,0,0,1]}
+    for i, base in enumerate(sequence):
+        encoded = mapping.get(base, [0,0,0,0])
+        features[f'pos_{i}_A'] = encoded[0]
+        features[f'pos_{i}_C'] = encoded[1]
+        features[f'pos_{i}_G'] = encoded[2]
+        features[f'pos_{i}_T'] = encoded[3]
+        
+    # 2. Local GC-Skew & 3. Thermodynamic Stability Proxy
+    stability_map = {'A': 2, 'T': 2, 'G': 3, 'C': 3}
+    for i in range(seq_len - window_size + 1):
+        window = sequence[i:i+window_size]
+        
+        # GC Skew
+        g_count = window.count('G')
+        c_count = window.count('C')
+        skew = (g_count - c_count) / (g_count + c_count) if (g_count + c_count) > 0 else 0.0
+        features[f'gc_skew_win_{i}'] = skew
+        
+        # Thermodynamic Stability (Hydrogen bonds)
+        stability = sum(stability_map.get(base, 2.5) for base in window) / window_size
+        features[f'stability_win_{i}'] = stability
+        
+    return features
+
+def prepare_dataset(data_path, k_size=3):
+    """Loads positive sequences, generates AEI negatives, and builds feature table."""
+    print(f"Loading positive sequences from {data_path}...")
+    with open(data_path, 'r') as f:
+        positives = [line.strip() for line in f if line.strip()]
+
+    print(f"Generating AEI negatives and extracting features...")
+    data_rows = []
+    
+    for pos_seq in positives:
+        # Positive Sample
+        pos_features = extract_promoter_features(pos_seq)
+        pos_features['label'] = 1
+        data_rows.append(pos_features)
+        
+        # Negative Sample (De Bruijn Adversarial)
+        neg_seq = generate_adversarial_negative(pos_seq, k=k_size)
+        if not neg_seq: # Fallback if graph fails
+            print("Fall back because graph fails...")
+            neg_seq = pos_seq
+        neg_features = extract_promoter_features(neg_seq)
+        neg_features['label'] = 0
+        data_rows.append(neg_features)
+        
+    return pd.DataFrame(data_rows)
+
+download_dbtbs_data.py
+import time
+import pandas as pd
+from Bio import SeqIO
+from Bio.SeqRecord import SeqRecord
+
+def transform(df):
+    df = df.rename(columns={
+        "Regulated Gene": "gene_id",
+        "Absolute position": "coordinates_raw",
+        "Binding seq.(cis-element)": "sequence"
+    })
+    data = []
+    pos_coords = []
+    
+    for _, row in df.iterrows():
+        coord_str = str(row["coordinates_raw"]).replace("..", "-")
+        if pd.isna(row["sequence"]) or row["sequence"] in ["", "ND", "None"]:
+            continue
+            
+        # Ensure we can split the coordinate string properly
+        coords = coord_str.split("-")
+        if len(coords) < 2:
+            continue
+            
+        try:
+            start, end = int(coords[0]), int(coords[-1])
+            pos_coords.append((start, end))
+            
+            data.append({
+                "gene_id": row["gene_id"],
+                "gene_name": row["gene_id"],
+                "coordinates": coord_str,
+                "sequence": row["sequence"],
+                "label": 1
+            })
+        except ValueError:
+            # Skip rows where coordinates are malformed text instead of numbers
+            continue
+            
+    return pd.DataFrame(data), pos_coords
+
+def collect_dbtbs_data():
+    sigmas = ["SigA", "SigB", "SigD", "SigE", "SigF", "SigG", "SigH", "SigK", "SigM", "SigW", "SigX", "SigY"]
+    base_url = "https://dbtbs.hgc.jp/COG/tfac"
+    all_sigma_data = []
+    all_positive_coords = []
+    good_cols = ["Regulated Gene", "Absolute position", "Binding seq.(cis-element)"]
+    
+    for sigma in sigmas:
+        print(f"Running collect data for sigma {sigma}")
+        try:
+            df = pd.read_html(f"{base_url}/{sigma}.html")
+            data_table = max(df, key=len)
+            
+            if not all(col in data_table.columns for col in good_cols):
+                print(f"  Skipping {sigma}: missing required columns.")
+                continue
+                
+            data_table = data_table[good_cols].copy()
+            clean_df, pos_coords = transform(data_table)
+            
+            # Track which sigma factor this is for FASTA headers
+            clean_df["sigma"] = sigma 
+            
+            all_sigma_data.append(clean_df)
+            all_positive_coords.extend(pos_coords)
+            
+        except Exception as e:
+            print(f"  Error while loading data for {sigma}: {e}")
+        
+        time.sleep(1)
+    
+    master_df = pd.concat(all_sigma_data, ignore_index=True)
+    print(f"\nSuccessfully collected {len(master_df)} valid operons/sequences.")
+    return master_df, all_positive_coords
+
+def extract_dbtbs_promoters(promoter_df, pos_coords, genome_fasta, output_fasta):
+    # Load the B. subtilis reference genome
+    genome_record = next(SeqIO.parse(genome_fasta, "fasta"))
+    genome_seq = genome_record.seq
+    extracted_records = []
+    
+    for idx, row in promoter_df.iterrows():
+        if idx >= len(pos_coords):
+            break
+            
+        gene_name = str(row['gene_id']).replace(" ", "_").replace("/", "-")
+        sigma = row['sigma']
+        
+        # Use the extracted coordinates from the transform function
+        start_pos, end_pos = pos_coords[idx]
+        
+        # Convert 1-based biological coordinate to 0-based Python index
+        anchor_index = start_pos - 1
+        
+        try:
+            if start_pos < end_pos:
+                # Plus strand: -60 upstream, +20 downstream
+                slice_start = anchor_index - 60
+                slice_end = anchor_index + 21
+                segment = genome_seq[slice_start:slice_end]
+            else:
+                # Minus strand (start > end): Reverse the upstream/downstream logic
+                slice_start = anchor_index - 20
+                slice_end = anchor_index + 61
+                segment = genome_seq[slice_start:slice_end].reverse_complement()
+                
+            if len(segment) == 81 and "N" not in segment.upper():
+                record = SeqRecord(
+                    segment,
+                    id=f"{gene_name}_{sigma}_{start_pos}",
+                    description="DBTBS_benchmark_81bp"
+                )
+                extracted_records.append(record)
+                
+        except IndexError:
+            continue
+            
+    SeqIO.write(extracted_records, output_fasta, "fasta")
+    print(f"Successfully extracted {len(extracted_records)} formatted sequences to {output_fasta}")
+
+
+# def extract_correct_dbtbs_promoters(promoter_df, genome_fasta, output_fasta):
+#     genome_record = next(SeqIO.parse(genome_fasta, "fasta"))
+#     genome_seq = genome_record.seq
+#     extracted_records = []
+    
+#     for idx, row in promoter_df.iterrows():
+#         gene_name = str(row['gene_id']).strip().replace(" ", "_").replace("/", "-")
+#         sigma = row['sigma']
+#         binding_seq = str(row['sequence']).upper()
+        
+#         # 1. Parse coordinates (FIXED: use 'coordinates' instead of 'coordinates_raw')
+#         coords_raw = str(row['coordinates']).replace("..", "-").split("-")
+#         try:
+#             pos1, pos2 = int(coords_raw[0]), int(coords_raw[-1])
+#         except ValueError:
+#             continue
+            
+#         # 2. Extract the raw genomic locus (0-based)
+#         start_idx = pos1 - 1
+#         end_idx = pos2
+#         locus_fwd = genome_seq[start_idx:end_idx].upper()
+        
+#         # 3. Deduce strand by aligning the DBTBS binding sequence to the genome
+#         # If the known binding sequence matches the reverse complement of the locus, it's on the minus strand.
+#         strand = '+'
+#         if binding_seq in locus_fwd.reverse_complement():
+#             strand = '-'
+            
+#         # 4. Handle strand orientation & slicing correctly
+#         if strand == '+':
+#             tss_estimate = pos1  
+#             slice_start = (tss_estimate - 1) - 60
+#             slice_end = (tss_estimate - 1) + 21
+#             segment = genome_seq[slice_start:slice_end]
+#         else:
+#             tss_estimate = pos2
+#             slice_start = (tss_estimate - 1) - 20
+#             slice_end = (tss_estimate - 1) + 61
+#             segment = genome_seq[slice_start:slice_end].reverse_complement()
+            
+#         if len(segment) == 81 and "N" not in segment.upper():
+#             rec = SeqRecord(
+#                 segment,
+#                 id=f"{gene_name}_{sigma}_{tss_estimate}",
+#                 description="DBTBS_benchmark_81bp"
+#             )
+#             extracted_records.append(rec)
+            
+#     SeqIO.write(extracted_records, output_fasta, "fasta")
+#     print(f"Successfully extracted {len(extracted_records)} correctly oriented sequences to {output_fasta}")
+
+
+def extract_correct_dbtbs_promoters(promoter_df, genome_fasta, output_fasta):
+    genome_record = next(SeqIO.parse(genome_fasta, "fasta"))
+    genome_seq = genome_record.seq
+    extracted_records = []
+    
+    for idx, row in promoter_df.iterrows():
+        gene_name = str(row['gene_id']).strip().replace(" ", "_").replace("/", "-")
+        sigma = row['sigma']
+        binding_seq = str(row['sequence']).upper()
+        
+        # 1. Parse coordinates
+        coords_raw = str(row['coordinates']).replace("..", "-").split("-")
+        try:
+            pos1, pos2 = int(coords_raw[0]), int(coords_raw[-1])
+        except ValueError:
+            continue
+            
+        # 2. Extract the raw genomic locus safely (handle max..min backwards notation)
+        p_min, p_max = min(pos1, pos2), max(pos1, pos2)
+        locus_fwd = genome_seq[p_min-1 : p_max].upper()
+        
+        # 3. Deduce strand
+        strand = '+'
+        if binding_seq in locus_fwd.reverse_complement():
+            strand = '-'
+            
+        # 4. Estimate true TSS position to center the binding site at index ~25 (-35 box)
+        if strand == '+':
+            # 5' end of binding site is p_min. Estimated TSS is ~35bp downstream.
+            tss_estimate = p_min + 35  
+            slice_start = (tss_estimate - 1) - 60
+            slice_end = (tss_estimate - 1) + 21
+            segment = genome_seq[slice_start:slice_end]
+        else:
+            # 5' end of binding site on minus strand is p_max. Estimated TSS is ~35bp downstream (minus direction).
+            tss_estimate = p_max - 35
+            slice_start = (tss_estimate - 1) - 20
+            slice_end = (tss_estimate - 1) + 61
+            segment = genome_seq[slice_start:slice_end].reverse_complement()
+            
+        if len(segment) == 81 and "N" not in segment.upper():
+            rec = SeqRecord(
+                segment,
+                id=f"{gene_name}_{sigma}_{tss_estimate}",
+                description="DBTBS_benchmark_81bp"
+            )
+            extracted_records.append(rec)
+            
+    SeqIO.write(extracted_records, output_fasta, "fasta")
+    print(f"Successfully extracted {len(extracted_records)} correctly aligned sequences to {output_fasta}")
+
+# Execute the pipeline
+df, _ = collect_dbtbs_data()
+# We drop the 'coords' argument entirely and let the function deduce the strand automatically
+extract_correct_dbtbs_promoters(df, "bsubtilis_genome.fasta", "dbtbs_benchmark.fasta")
+
+
+evaluate_external.py
+import argparse
+import numpy as np
+import torch
+import torch.nn as nn
+from pathlib import Path
+from sklearn.metrics import roc_curve, roc_auc_score, matthews_corrcoef, precision_score, recall_score, confusion_matrix
+
+# 1. Define the model blueprint
+class CNN_BiLSTM(nn.Module):
+    def __init__(self):
+        super(CNN_BiLSTM, self).__init__()
+        self.conv = nn.Conv1d(4, 128, 15)
+        self.relu = nn.ReLU()
+        self.pool = nn.MaxPool1d(5)
+        self.dropout1 = nn.Dropout(0.2)
+        self.lstm = nn.LSTM(128, 32, bidirectional=True, batch_first=True)
+        self.dropout2 = nn.Dropout(0.5)
+        self.fc = nn.Linear(64, 1)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        x = self.dropout1(self.pool(self.relu(self.conv(x))))
+        x = x.transpose(1, 2)
+        x, _ = self.lstm(x)
+        return self.sigmoid(self.fc(self.dropout2(x[:, -1, :])))
+
+# 2. Define the tensor encoder
+def get_onehot_tensor(seqs):
+    mapping = {'A': [1,0,0,0], 'C': [0,1,0,0], 'G': [0,0,1,0], 'T': [0,0,0,1]}
+    tensors = [np.array([mapping.get(b, [0.25]*4) for b in s]).T for s in seqs]
+    return torch.tensor(np.array(tensors), dtype=torch.float32)
+
+def evaluate_external(pos_path, neg_path, model_dir):
+    print(f"Loading model from {model_dir}...")
+    
+    # 3. Load the PyTorch model properly
+    model = CNN_BiLSTM()
+    model.load_state_dict(torch.load(Path(model_dir) / "best_model.pt", map_location=torch.device('cpu')))
+    model.eval()
+    
+    # Load sequences
+    with open(pos_path, 'r') as f:
+        pos_seqs = [line.strip() for line in f if len(line.strip()) == 81]
+    with open(neg_path, 'r') as f:
+        neg_seqs = [line.strip() for line in f if len(line.strip()) == 81]
+        
+    print(f"Evaluating on {len(pos_seqs)} external positives and {len(neg_seqs)} external negatives.")
+    
+    # Build dataset
+    all_seqs = pos_seqs + neg_seqs
+    y_true = np.array([1]*len(pos_seqs) + [0]*len(neg_seqs))
+    
+    # 4. Convert sequences to tensors and predict
+    X = get_onehot_tensor(all_seqs)
+    with torch.no_grad():
+        y_proba = model(X).squeeze().numpy()
+    
+    # Calculate Metrics
+    auc = roc_auc_score(y_true, y_proba)
+    
+    # --- FIND OPTIMAL THRESHOLD (Youden's J Statistic) ---
+    fpr, tpr, thresholds = roc_curve(y_true, y_proba)
+    youden_j = tpr - fpr
+    optimal_idx = np.argmax(youden_j)
+    optimal_threshold = thresholds[optimal_idx]
+    
+    print(f"\nDefault 0.5 Threshold is too strict. Adjusting to Optimal Threshold: {optimal_threshold:.4f}")
+    
+    # Apply new threshold
+    y_pred = (y_proba >= optimal_threshold).astype(int)
+    
+    mcc = matthews_corrcoef(y_true, y_pred)
+    precision = precision_score(y_true, y_pred, zero_division=0)
+    recall = recall_score(y_true, y_pred, zero_division=0)
+    cm = confusion_matrix(y_true, y_pred)
+    
+    print("\n" + "="*50)
+    print("EXTERNAL VALIDATION RESULTS (AEI-CNN+BiLSTM)")
+    print("="*50)
+    print(f"AUC:       {auc:.4f}")
+    print(f"MCC:       {mcc:.4f}")
+    print(f"Precision: {precision:.4f}")
+    print(f"Recall:    {recall:.4f}")
+    print("-" * 50)
+    print("Confusion Matrix:")
+    print(f"True Negatives:  {cm[0][0]} | False Positives: {cm[0][1]}")
+    print(f"False Negatives: {cm[1][0]} | True Positives:  {cm[1][1]}")
+    print("="*50)
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--pos", type=str, required=True)
+    parser.add_argument("--neg", type=str, required=True)
+    parser.add_argument("--model-dir", type=str, required=True)
+
+    args = parser.parse_args()
+    evaluate_external(args.pos, args.neg, args.model_dir)
+
+evaluate_sigma_factors.py
+import argparse
+import os
+import re
+from pathlib import Path
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from Bio import SeqIO
+from sklearn.metrics import roc_curve, roc_auc_score, recall_score
+import torch.nn as nn
+import torch
+
+
+class CNN_BiLSTM(nn.Module):
+    def __init__(self):
+        super(CNN_BiLSTM, self).__init__()
+        self.conv = nn.Conv1d(4, 128, 15)
+        self.relu = nn.ReLU()
+        self.pool = nn.MaxPool1d(5)
+        self.dropout1 = nn.Dropout(0.2)
+        self.lstm = nn.LSTM(128, 32, bidirectional=True, batch_first=True)
+        self.dropout2 = nn.Dropout(0.5)
+        self.fc = nn.Linear(64, 1)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        x = self.dropout1(self.pool(self.relu(self.conv(x))))
+        x = x.transpose(1, 2)
+        x, _ = self.lstm(x)
+        return self.sigmoid(self.fc(self.dropout2(x[:, -1, :])))
+
+def parse_fasta_sigmas(fasta_path):
+    """Parse FASTA headers formatted like '>abnA_SigA_2950133 DBTBS_benchmark_81bp'."""
+    records = list(SeqIO.parse(fasta_path, "fasta"))
+    data = []
+    
+    for rec in records:
+        # rec.id gets sequence identifier prior to spaces (e.g., abnA_SigA_2950133)
+        header_id = rec.id.split()[0]
+        parts = header_id.split('_')
+        
+        # Extract sigma factor (e.g., 'SigA', 'SigB', 'SigK')
+        sigma = "Unknown"
+        for part in parts:
+            if re.match(r'^Sig[A-Z0-9]+$', part, re.IGNORECASE):
+                sigma = part.capitalize()
+                break
+                
+        data.append({
+            "id": header_id,
+            "sigma": sigma,
+            "sequence": str(rec.seq).upper()
+        })
+        
+    df = pd.DataFrame(data)
+    df.to_csv("dbtbs_benchmark_parsed.csv", index=False)
+    print(f"Parsed {len(df)} sequences across {df['sigma'].nunique()} sigma factors:")
+    print(df['sigma'].value_counts().to_string())
+    return df
+
+def one_hot_encode(sequences, channel_first=True):
+    """Convert DNA sequences to one-hot tensors for CNN inputs."""
+    mapping = {'A': 0, 'C': 1, 'G': 2, 'T': 3}
+    encoded_list = []
+    
+    for seq in sequences:
+        arr = np.zeros((4, len(seq)), dtype=np.float32)
+        for i, base in enumerate(seq):
+            if base in mapping:
+                arr[mapping[base], i] = 1.0
+        if not channel_first:
+            arr = arr.T  # (L, 4)
+        encoded_list.append(arr)
+        
+    return np.array(encoded_list)
+
+
+def get_onehot_tensor(seqs):
+    """The exact tensor encoder used during GPlusD training."""
+    mapping = {'A': [1,0,0,0], 'C': [0,1,0,0], 'G': [0,0,1,0], 'T': [0,0,0,1]}
+    tensors = [np.array([mapping.get(b, [0.25]*4) for b in s]).T for s in seqs]
+    return torch.tensor(np.array(tensors), dtype=torch.float32)
+
+class ModelPredictor:
+    """Unified predictor wrapper handling CNNs (PyTorch/TF) or feature-based models."""
+    def __init__(self, model_dir):
+        self.model_dir = Path(model_dir)
+        self.model_type = None
+        self.model = None
+        self.feature_cols = None
+        self._load_model()
+
+    def _load_model(self):
+        pt_path = self.model_dir / "best_model.pt"
+        # Create the model structure first
+        self.model = CNN_BiLSTM()
+        # Pour the .pt weights into the structure
+        self.model.load_state_dict(torch.load(pt_path, map_location=torch.device('cpu')))
+        self.model.eval()
+        self.model_type = "pytorch_cnn"
+        print(f"Loaded PyTorch CNN model from {pt_path}")
+        return
+
+    # def predict_proba(self, sequences):
+    #     X = get_onehot_tensor(sequences)
+    #     with torch.no_grad():
+    #         out = self.model(X)
+    #         if out.shape[-1] == 1 or len(out.shape) == 1:
+    #             probs = torch.sigmoid(out).squeeze().numpy()
+    #         else:
+    #             probs = torch.softmax(out, dim=1)[:, 1].numpy()
+    #     return np.atleast_1d(probs)
+    def predict_proba(self, sequences):
+        X = get_onehot_tensor(sequences)
+        with torch.no_grad():
+            out = self.model(X)
+            # FIX: The model already applies sigmoid natively. Do not apply it twice.
+            probs = out.squeeze().numpy()
+        return np.atleast_1d(probs)
+
+def main(fasta_path, neg_path, model_dir, output_dir, min_samples=10):
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    
+    # Load Model Predictor
+    predictor = ModelPredictor(model_dir)
+    
+    # Parse Benchmark Data
+    pos_df = parse_fasta_sigmas(fasta_path)
+    
+    # Load Background Negatives
+    with open(neg_path, 'r') as f:
+        neg_seqs = [line.strip().upper() for line in f if len(line.strip()) == 81]
+    
+    print(f"Loaded {len(neg_seqs)} background negative sequences.")
+    neg_probs = predictor.predict_proba(neg_seqs)
+    
+    # Group by Sigma Factor and Compute Metrics
+    sigmas = pos_df['sigma'].value_counts()
+    valid_sigmas = sigmas[sigmas >= min_samples].index.tolist()
+    
+    fig, (ax_roc, ax_bar) = plt.subplots(1, 2, figsize=(16, 6))
+    sns.set_theme(style="whitegrid")
+    
+    metrics = []
+    
+    for sigma in valid_sigmas:
+        sig_seqs = pos_df[pos_df['sigma'] == sigma]['sequence'].tolist()
+        pos_probs = predictor.predict_proba(sig_seqs)
+        
+        # Combine positives for this sigma with background negatives
+        y_true = np.concatenate([np.ones(len(pos_probs)), np.zeros(len(neg_probs))])
+        y_score = np.concatenate([pos_probs, neg_probs])
+        
+        # Compute Metrics
+        auc = roc_auc_score(y_true, y_score)
+        sensitivity = np.mean(pos_probs >= 0.5)
+        fpr, tpr, _ = roc_curve(y_true, y_score)
+        
+        metrics.append({
+            "Sigma Factor": sigma,
+            "Count": len(sig_seqs),
+            "AUC": auc,
+            "Sensitivity": sensitivity
+        })
+        
+        # Plot ROC curve for each sigma factor
+        ax_roc.plot(fpr, tpr, label=f"{sigma} (n={len(sig_seqs)}, AUC={auc:.3f})", lw=2)
+
+    # Styling ROC Panel
+    ax_roc.plot([0, 1], [0, 1], 'k--', lw=1, alpha=0.7)
+    ax_roc.set_xlim([0.0, 1.0])
+    ax_roc.set_ylim([0.0, 1.05])
+    ax_roc.set_xlabel('False Positive Rate', fontweight='bold')
+    ax_roc.set_ylabel('True Positive Rate', fontweight='bold')
+    ax_roc.set_title('ROC Curves Stratified by Sigma Factor', fontweight='bold', fontsize=14)
+    ax_roc.legend(loc="lower right", frameon=True)
+
+    # Plot Performance Metrics Bar Chart
+    metrics_df = pd.DataFrame(metrics)
+    
+    # CORRECTED: Use 'value_name' instead of 'value_value_name'
+    melted_df = pd.melt(metrics_df, id_vars=['Sigma Factor', 'Count'], 
+                        value_vars=['AUC', 'Sensitivity'], 
+                        var_name='Metric', value_name='Score')
+    
+    melted_df['Sigma Label'] = melted_df.apply(lambda r: f"{r['Sigma Factor']}\n(n={r['Count']})", axis=1)
+    
+    # CORRECTED: y axis must match 'Score'
+    sns.barplot(data=melted_df, x='Sigma Label', y='Score', hue='Metric', 
+                palette=['#1f77b4', '#2ca02c'], ax=ax_bar)
+    
+    ax_bar.set_ylim([0.0, 1.05])
+    ax_bar.set_ylabel('Score', fontweight='bold')
+    ax_bar.set_xlabel('Sigma Factor', fontweight='bold')
+    ax_bar.set_title('Model Performance Metrics', fontweight='bold', fontsize=14)
+    ax_bar.legend(loc="lower right")
+
+    plt.tight_layout()
+    plot_file = Path(output_dir) / 'sigma_factor_performance.pdf'
+    plt.savefig(plot_file, dpi=600)
+    print(f"\nSaved performance evaluation figure to {plot_file}")
+    
+    # Output Table
+    print("\nDetailed Performance Table:")
+    print(metrics_df.to_string(index=False, float_format="%.4f"))
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description="Evaluate model across sigma factors.")
+    parser.add_argument("--fasta", type=str, default="dbtbs_benchmark.fasta", help="FASTA file containing benchmark sequences")
+    parser.add_argument("--neg", type=str, default="data/dbtbs_negatives.txt", help="Background negative sequence file")
+    parser.add_argument("--model-dir", type=str, default="models/aei_cnn", help="Directory containing the model checkpoint")
+    parser.add_argument("--out-dir", type=str, default="figs", help="Output directory for plots")
+    parser.add_argument("--min-samples", type=int, default=10, help="Minimum sequences required to evaluate a sigma factor")
+    
+    args = parser.parse_args()
+    main(args.fasta, args.neg, args.model_dir, args.out_dir, args.min_samples)
+
+fetch_true_dbtbs.py
+import os
+import subprocess
+from Bio import SeqIO
+
+def fetch_cnnpromoter_data():
+    os.makedirs("data", exist_ok=True)
+    repo_dir = "data/CNNPromoterData"
+    
+    # 1. Clone the official CNNPromoter benchmark repository
+    if not os.path.exists(repo_dir):
+        print("Cloning the official CNNPromoter benchmark dataset...")
+        subprocess.run(["git", "clone", "https://github.com/solovictor/CNNPromoterData.git", repo_dir])
+    
+    # 2. Extract B. subtilis (Gram-positive) SigmaA promoters
+    pos_fasta = os.path.join(repo_dir, "B._subtilis", "sigmaA", "positives.fasta")
+    neg_fasta = os.path.join(repo_dir, "B._subtilis", "sigmaA", "negatives.fasta")
+    
+    if not os.path.exists(pos_fasta):
+        print(f"Error: Could not find {pos_fasta}. The repo structure might have changed.")
+        return
+
+    # 3. Format as clean text files (81bp) for your LightGBM model
+    def fasta_to_txt(fasta_path, txt_path):
+        sequences = []
+        for record in SeqIO.parse(fasta_path, "fasta"):
+            seq = str(record.seq).upper()
+            if len(seq) == 81 and 'N' not in seq:
+                sequences.append(seq)
+        
+        with open(txt_path, "w") as f:
+            for seq in sequences:
+                f.write(f"{seq}\n")
+        return len(sequences)
+
+    pos_count = fasta_to_txt(pos_fasta, "data/dbtbs_positives.txt")
+    neg_count = fasta_to_txt(neg_fasta, "data/dbtbs_negatives.txt")
+    
+    print(f"Successfully formatted {pos_count} TSS-aligned DBTBS positives.")
+    print(f"Successfully formatted {neg_count} TSS-aligned DBTBS negatives.")
+    print("Ready for external evaluation!")
+
+if __name__ == "__main__":
+    fetch_cnnpromoter_data()
+
+format_dbtbs.py
+import os
+import random
+from Bio import SeqIO
+
+def fasta_to_txt(fasta_path, txt_path, max_samples=None):
+    sequences = []
+    # Make sure the data folder exists
+    os.makedirs(os.path.dirname(txt_path), exist_ok=True)
+    
+    for record in SeqIO.parse(fasta_path, "fasta"):
+        seq = str(record.seq).upper()
+        # Keep sequences that are exactly 81bp and have no unknown 'N' bases
+        if len(seq) == 81 and 'N' not in seq:
+            sequences.append(seq)
+            
+    # If a max limit is set, randomly downsample to balance the dataset
+    if max_samples is not None and len(sequences) > max_samples:
+        sequences = random.sample(sequences, max_samples)
+    
+    with open(txt_path, "w") as f:
+        for seq in sequences:
+            f.write(f"{seq}\n")
+    return len(sequences)
+
+if __name__ == "__main__":
+    random.seed(42) # Set seed for reproducibility
+    
+    # 1. Process Positives first to get the target count
+    pos_count = fasta_to_txt("data/CNNPromoterData/Bacillus_prom.fa", "data/dbtbs_positives.txt")
+    
+    # 2. Process Negatives and cap them at the positive count
+    neg_count = fasta_to_txt("data/CNNPromoterData/Bacillus_non_prom.fa", "data/dbtbs_negatives.txt", max_samples=pos_count)
+    
+    print(f"Successfully formatted {pos_count} TSS-aligned DBTBS positives.")
+    print(f"Successfully formatted {neg_count} TSS-aligned DBTBS negatives (balanced).")
+
+generate_aei_negatives.py
+import argparse
+import os
+from generate_negative_sequences import generate_adversarial_negative
+
+def main(input_file, output_file, k=3):
+    print(f"Reading positive sequences from {input_file}...")
+    with open(input_file, 'r') as f:
+        positives = [line.strip().upper() for line in f if line.strip()]
+        
+    print(f"Generating AEI negative sequences (k={k})... This may take a minute.")
+    negatives = []
+    for seq in positives:
+        neg_seq = generate_adversarial_negative(seq, k=k)
+        # Fallback if the graph couldn't find a divergent Eulerian path
+        if not neg_seq:
+            neg_seq = seq 
+        negatives.append(neg_seq)
+        
+    with open(output_file, 'w') as f:
+        for seq in negatives:
+            f.write(f"{seq}\n")
+            
+    print(f"Successfully saved {len(negatives)} AEI negative sequences to {output_file}")
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--input", type=str, required=True, help="Path to positive sequences (e.g., data/prokaryote_promoters.txt)")
+    parser.add_argument("--output", type=str, required=True, help="Path to save negative sequences")
+    parser.add_argument("-k", type=int, default=3, help="K-mer size for De Bruijn graph")
+    args = parser.parse_args()
+    main(args.input, args.output, args.k)
+
+generate_clean_plots.py
+# Add PyTorch imports at the top
+import torch
+import torch.nn as nn
+import argparse
+import joblib
+import pandas as pd
+import numpy as np
+from pathlib import Path
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.metrics import roc_curve, auc, precision_recall_curve, average_precision_score
+import logomaker
+from dataset_builder import extract_promoter_features
+import os
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'
+
+class CNN_BiLSTM(nn.Module):
+    def __init__(self):
+        super(CNN_BiLSTM, self).__init__()
+        self.conv = nn.Conv1d(4, 128, 15)
+        self.relu = nn.ReLU()
+        self.pool = nn.MaxPool1d(5)
+        self.dropout1 = nn.Dropout(0.2)
+        self.lstm = nn.LSTM(128, 32, bidirectional=True, batch_first=True)
+        self.dropout2 = nn.Dropout(0.5)
+        self.fc = nn.Linear(64, 1)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        x = self.dropout1(self.pool(self.relu(self.conv(x))))
+        x = x.transpose(1, 2)
+        x, _ = self.lstm(x)
+        return self.sigmoid(self.fc(self.dropout2(x[:, -1, :]))).squeeze()
+
+def get_onehot_tensor(seqs):
+    mapping = {'A': [1,0,0,0], 'C': [0,1,0,0], 'G': [0,0,1,0], 'T': [0,0,0,1]}
+    tensors = [np.array([mapping.get(b, [0.25]*4) for b in s]).T for s in seqs]
+    return torch.tensor(np.array(tensors), dtype=torch.float32)
+
+
+
+def plot_roc_pr_curves(y_true, y_proba, output_dir):
+    sns.set_style("whitegrid")
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+    
+    fpr, tpr, _ = roc_curve(y_true, y_proba)
+    roc_auc = auc(fpr, tpr)
+    ax1.plot(fpr, tpr, color='darkorange', lw=2, label=f'AEI-LGBM (AUC = {roc_auc:.3f})')
+    ax1.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
+    ax1.set_xlim([0.0, 1.0])
+    ax1.set_ylim([0.0, 1.05])
+    ax1.set_xlabel('False Positive Rate', fontweight='bold')
+    ax1.set_ylabel('True Positive Rate', fontweight='bold')
+    ax1.set_title('ROC Curve (External Benchmark)', fontweight='bold')
+    ax1.legend(loc="lower right")
+
+    precision, recall, _ = precision_recall_curve(y_true, y_proba)
+    ap = average_precision_score(y_true, y_proba)
+    ax2.plot(recall, precision, color='green', lw=2, label=f'AEI-LGBM (AP = {ap:.3f})')
+    ax2.set_xlim([0.0, 1.0])
+    ax2.set_ylim([0.0, 1.05])
+    ax2.set_xlabel('Recall', fontweight='bold')
+    ax2.set_ylabel('Precision', fontweight='bold')
+    ax2.set_title('Precision-Recall Curve (External Benchmark)', fontweight='bold')
+    ax2.legend(loc="lower left")
+    
+    plt.tight_layout()
+    plt.savefig(Path(output_dir) / 'roc_pr_curves.pdf', dpi=400)
+    print("Saved ROC and PR curves.")
+
+
+
+def generate_3panel_logos(pos_train_file, bio_neg_file, aei_neg_file, output_dir):
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    
+    def get_info_matrix(file_path):
+        with open(file_path, 'r') as f:
+            seqs = [line.strip().upper() for line in f if len(line.strip()) == 81]
+        counts = pd.DataFrame(0, index=range(81), columns=['A', 'C', 'G', 'T'])
+        for seq in seqs:
+            for i, base in enumerate(seq[:81]):
+                if base in counts.columns:
+                    counts.loc[i, base] += 1
+        prob_matrix = counts.div(counts.sum(axis=1), axis=0)
+        return logomaker.transform_matrix(prob_matrix, from_type='probability', to_type='information')
+
+    # 1. Positive Training Logo
+    fig, ax1 = plt.subplots(figsize=(10, 3))
+    logomaker.Logo(get_info_matrix(pos_train_file), ax=ax1, color_scheme='classic')
+    ax1.set_title('True Gram-Positive Promoters (Positive Set)', fontweight='bold')
+    ax1.set_ylabel('bits', fontweight='bold')
+    ax1.set_ylim([0, 2.0])
+    plt.tight_layout()
+    plt.savefig(Path(output_dir) / 'logo_1_positive.pdf', dpi=600)
+    plt.close()
+
+    # 2. Biological Genomic Background Logo (CNNPromoter)
+    fig, ax2 = plt.subplots(figsize=(10, 3))
+    logomaker.Logo(get_info_matrix(bio_neg_file), ax=ax2, color_scheme='classic')
+    ax2.set_title('Biological Genomic Background (Traditional Negatives)', fontweight='bold')
+    ax2.set_ylabel('bits', fontweight='bold')
+    ax2.set_ylim([0, 2.0])
+    plt.tight_layout()
+    plt.savefig(Path(output_dir) / 'logo_2_bio_negative.pdf', dpi=600)
+    plt.close()
+
+    # 3. AEI Engineered Background Logo
+    fig, ax3 = plt.subplots(figsize=(10, 3))
+    logomaker.Logo(get_info_matrix(aei_neg_file), ax=ax3, color_scheme='classic')
+    ax3.set_title('De Bruijn AEI Engineered Negatives (Proposed)', fontweight='bold')
+    ax3.set_ylabel('bits', fontweight='bold')
+    ax3.set_xlabel('Sequence Position', fontweight='bold')
+    ax3.set_ylim([0, 2.0])
+    plt.tight_layout()
+    plt.savefig(Path(output_dir) / 'logo_3_aei_negative.pdf', dpi=600)
+    plt.close()
+    print("Saved 3-panel logos separately.")
+
+
+
+def generate_comparative_logo(pos_file, neg_file, output_dir):
+    with open(pos_file, 'r') as f:
+        pos_seqs = [line.strip().upper() for line in f if len(line.strip()) == 81]
+    with open(neg_file, 'r') as f:
+        neg_seqs = [line.strip().upper() for line in f if len(line.strip()) == 81]
+
+    def get_info_matrix(seqs):
+        counts = pd.DataFrame(0, index=range(81), columns=['A', 'C', 'G', 'T'])
+        for seq in seqs:
+            for i, base in enumerate(seq[:81]):
+                if base in counts.columns:
+                    counts.loc[i, base] += 1
+        prob_matrix = counts.div(counts.sum(axis=1), axis=0)
+        return logomaker.transform_matrix(prob_matrix, from_type='probability', to_type='information')
+
+    pos_info = get_info_matrix(pos_seqs)
+    neg_info = get_info_matrix(neg_seqs)
+
+    # Positive Logo
+    fig, ax1 = plt.subplots(figsize=(10, 3))
+    logomaker.Logo(pos_info, ax=ax1, color_scheme='classic')
+    ax1.set_title('Gram-Positive Promoters (Positive Training Set)', fontweight='bold')
+    ax1.set_ylabel('bits', fontweight='bold')
+    ax1.set_ylim([0, 2.0])
+    plt.tight_layout()
+    plt.savefig(Path(output_dir) / 'logo_positive.pdf', dpi=600)
+    plt.close()
+
+    # Negative Logo
+    fig, ax2 = plt.subplots(figsize=(10, 3))
+    logomaker.Logo(neg_info, ax=ax2, color_scheme='classic')
+    ax2.set_title('De Bruijn AEI Non-Promoters (Negative Training Set)', fontweight='bold')
+    ax2.set_ylabel('bits', fontweight='bold')
+    ax2.set_xlabel('Sequence Position', fontweight='bold')
+    ax2.set_ylim([0, 2.0])
+    plt.tight_layout()
+    plt.savefig(Path(output_dir) / 'logo_negative.pdf', dpi=600)
+    plt.close()
+
+def plot_true_positive_logo(tp_seqs, output_dir):
+    if not tp_seqs:
+        print("No True Positives found to plot logo.")
+        return
+        
+    counts = pd.DataFrame(0, index=range(81), columns=['A', 'C', 'G', 'T'])
+    for seq in tp_seqs:
+        for i, base in enumerate(seq):
+            if base in counts.columns:
+                counts.loc[i, base] += 1
+                
+    prob_matrix = counts.div(counts.sum(axis=1), axis=0)
+    info_matrix = logomaker.transform_matrix(prob_matrix, from_type='probability', to_type='information')
+    
+    fig, ax = plt.subplots(1, 1, figsize=(16, 4))
+    logomaker.Logo(info_matrix, ax=ax, color_scheme='classic')
+    
+    # Approximate regions for -35 and -10 boxes based on -60 to +20 alignment
+    ax.axvspan(20, 26, color='red', alpha=0.1, label='-35 Box Region')
+    ax.axvspan(44, 50, color='blue', alpha=0.1, label='-10 Box Region')
+    
+    ax.set_title("Sequence Logo of External True Positives (Successfully Predicted)", fontweight='bold', fontsize=16)
+    ax.set_ylabel("Information (bits)", fontweight='bold', fontsize=12)
+    ax.set_xlabel("Position (bp)", fontweight='bold', fontsize=12)
+    ax.legend(loc='upper right')
+    
+    plt.tight_layout()
+    plt.savefig(Path(output_dir) / 'true_positive_sequence_logo.pdf', dpi=400)
+    print("Saved True Positive Sequence Logo.")
+
+# def main(ext_pos, ext_neg, train_pos, train_neg, model_dir, output_dir):
+#     Path(output_dir).mkdir(parents=True, exist_ok=True)
+    
+#     model = joblib.load(Path(model_dir) / "best_model.pkl")
+#     feature_cols = joblib.load(Path(model_dir) / "feature_columns.pkl")
+    
+#     with open(ext_pos, 'r') as f:
+#         pos_seqs = [line.strip() for line in f if len(line.strip()) == 81]
+#     with open(ext_neg, 'r') as f:
+#         neg_seqs = [line.strip() for line in f if len(line.strip()) == 81]
+        
+#     all_seqs = pos_seqs + neg_seqs
+#     y_true = np.array([1]*len(pos_seqs) + [0]*len(neg_seqs))
+    
+#     features_list = [extract_promoter_features(seq) for seq in all_seqs]
+#     df = pd.DataFrame(features_list).reindex(columns=feature_cols, fill_value=0)
+    
+#     y_proba = model.predict(df)
+#     # y_pred = (y_proba >= 0.5).astype(int)
+#     # Calculate Optimal Threshold dynamically for the plots
+#     fpr, tpr, thresholds = roc_curve(y_true, y_proba)
+#     optimal_idx = np.argmax(tpr - fpr)
+#     optimal_threshold = thresholds[optimal_idx]
+#     print(f"Plotting using Optimal Threshold: {optimal_threshold:.4f}")
+#     y_pred = (y_proba >= optimal_threshold).astype(int)
+    
+#     # Isolate the sequences that were Positive AND the model predicted Positive
+#     tp_seqs = [pos_seqs[i] for i in range(len(pos_seqs)) if y_pred[i] == 1]
+    
+#     # 1. Evaluate External Benchmark
+#     # plot_roc_pr_curves(y_true, y_proba, output_dir)
+#     plot_roc_curve(y_true, y_proba, output_dir)
+#     plot_pr_curve(y_true, y_proba, output_dir)
+#     # 2. Generate True Positive Logo
+#     plot_true_positive_logo(tp_seqs, output_dir)
+#     # plot_negative_logo(neg_seqs, output_dir)
+#     # 3. Generate Comparative Training Logo
+#     if train_pos and train_neg:
+#         # generate_comparative_logo(train_pos, train_neg, output_dir)
+#         generate_3panel_logos(train_pos, ext_neg, train_neg, output_dir)
+        
+#     print(f"Successfully generated all paper figures in '{output_dir}'.")
+
+def plot_roc_curve(y_true, y_proba, output_dir):
+    sns.set_style("whitegrid")
+    plt.figure(figsize=(7, 6))
+    fpr, tpr, _ = roc_curve(y_true, y_proba)
+    roc_auc = auc(fpr, tpr)
+    
+    plt.plot(fpr, tpr, color='darkorange', lw=2.5, label=f'AEI-LightGBM (AUC = {roc_auc:.3f})')
+    plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
+    plt.xlim([0.0, 1.0])
+    plt.ylim([0.0, 1.05])
+    plt.xlabel('False Positive Rate', fontweight='bold', fontsize=12)
+    plt.ylabel('True Positive Rate', fontweight='bold', fontsize=12)
+    plt.title('ROC Curve (External Benchmark)', fontweight='bold', fontsize=14)
+    plt.legend(loc="lower right", fontsize=11)
+    
+    plt.tight_layout()
+    plt.savefig(Path(output_dir) / 'roc_curve.pdf', dpi=600)
+    plt.close()
+
+def plot_pr_curve(y_true, y_proba, output_dir):
+    sns.set_style("whitegrid")
+    plt.figure(figsize=(7, 6))
+    precision, recall, _ = precision_recall_curve(y_true, y_proba)
+    ap = average_precision_score(y_true, y_proba)
+    
+    plt.plot(recall, precision, color='green', lw=2.5, label=f'AEI-LightGBM (AP = {ap:.3f})')
+    plt.xlim([0.0, 1.0])
+    plt.ylim([0.0, 1.05])
+    plt.xlabel('Recall', fontweight='bold', fontsize=12)
+    plt.ylabel('Precision', fontweight='bold', fontsize=12)
+    plt.title('Precision-Recall Curve', fontweight='bold', fontsize=14)
+    plt.legend(loc="lower left", fontsize=11)
+    
+    plt.tight_layout()
+    plt.savefig(Path(output_dir) / 'pr_curve.pdf', dpi=600)
+    plt.close()
+
+
+
+
+
+
+def main(ext_pos, ext_neg, train_pos, train_neg, model_dir, output_dir):
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    
+    # LOAD PYTORCH MODEL INSTEAD OF JOBLIB
+    model = CNN_BiLSTM()
+    model.load_state_dict(torch.load(Path(model_dir) / "best_model.pt"))
+    model.eval()
+    
+    with open(ext_pos, 'r') as f:
+        pos_seqs = [line.strip() for line in f if len(line.strip()) == 81]
+    with open(ext_neg, 'r') as f:
+        neg_seqs = [line.strip() for line in f if len(line.strip()) == 81]
+        
+    all_seqs = pos_seqs + neg_seqs
+    y_true = np.array([1]*len(pos_seqs) + [0]*len(neg_seqs))
+    
+    # INFERENCE VIA PYTORCH TENSOR
+    X_tensor = get_onehot_tensor(all_seqs)
+    with torch.no_grad():
+        y_proba = model(X_tensor).numpy()
+    
+    fpr, tpr, thresholds = roc_curve(y_true, y_proba)
+    optimal_idx = np.argmax(tpr - fpr)
+    optimal_threshold = thresholds[optimal_idx]
+    y_pred = (y_proba >= optimal_threshold).astype(int)
+    
+    tp_seqs = [pos_seqs[i] for i in range(len(pos_seqs)) if y_pred[i] == 1]
+    
+    # (Keep the rest of your plotting function calls the same)
+    plot_roc_curve(y_true, y_proba, output_dir)
+    plot_pr_curve(y_true, y_proba, output_dir)
+    plot_true_positive_logo(tp_seqs, output_dir)
+    if train_pos and train_neg:
+        generate_3panel_logos(train_pos, ext_neg, train_neg, output_dir)
+        
+        
+        
+    
+    
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--ext-pos", type=str, default="data/dbtbs_positives.txt")
+    parser.add_argument("--ext-neg", type=str, default="data/dbtbs_negatives.txt")
+    parser.add_argument("--train-pos", type=str, help="e.g., data/gplus.txt")
+    parser.add_argument("--train-neg", type=str, help="e.g., data/gplus_negative.txt")
+    parser.add_argument("--model-dir", type=str, required=True)
+    parser.add_argument("--out-dir", type=str, default="figs")
+    # parser.add_argument("--model-prefix", type=str, help="prefix for naming the model e.g gminus gplus")
+    
+    args = parser.parse_args()
+
+    main(args.ext_pos, args.ext_neg, args.train_pos, args.train_neg, args.model_dir, args.out_dir)
+
+generate_clean_shap_plots.py
+import argparse
+import torch
+import torch.nn as nn
+import numpy as np
+from pathlib import Path
+import matplotlib.pyplot as plt
+import shap
+import os
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'
+
+
+
+class CNN_BiLSTM(nn.Module):
+    def __init__(self):
+        super(CNN_BiLSTM, self).__init__()
+        self.conv = nn.Conv1d(4, 128, 15)
+        self.relu = nn.ReLU()
+        self.pool = nn.MaxPool1d(5)
+        self.dropout1 = nn.Dropout(0.2)
+        self.lstm = nn.LSTM(128, 32, bidirectional=True, batch_first=True)
+        self.dropout2 = nn.Dropout(0.5)
+        self.fc = nn.Linear(64, 1)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        x = self.dropout1(self.pool(self.relu(self.conv(x))))
+        x = x.transpose(1, 2)
+        x, _ = self.lstm(x)
+        return self.sigmoid(self.fc(self.dropout2(x[:, -1, :])))
+
+def get_onehot_tensor(seqs):
+    mapping = {'A': [1,0,0,0], 'C': [0,1,0,0], 'G': [0,0,1,0], 'T': [0,0,0,1]}
+    tensors = [np.array([mapping.get(b, [0.25]*4) for b in s]).T for s in seqs]
+    return torch.tensor(np.array(tensors), dtype=torch.float32)
+
+
+def main(pos_path, neg_path, model_dir, output_dir):
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    
+    model = CNN_BiLSTM()
+    model.load_state_dict(torch.load(Path(model_dir) / "best_model.pt"))
+    model.eval()
+    
+    with open(pos_path, 'r') as f:
+        pos_seqs = [line.strip() for line in f if len(line.strip()) == 81]
+    with open(neg_path, 'r') as f:
+        neg_seqs = [line.strip() for line in f if len(line.strip()) == 81]
+        
+    X_tensor = get_onehot_tensor(pos_seqs + neg_seqs)
+    
+    print("Calculating SHAP GradientExplainer values (LSTM compatible)...")
+    # Use a random background of 100 sequences to initialize GradientExplainer
+    background = X_tensor[np.random.choice(X_tensor.shape[0], 100, replace=False)]
+    
+    # 1. Switch to GradientExplainer
+    explainer = shap.GradientExplainer(model, background)
+    
+    # Explain the positive sequences
+    test_tensor = get_onehot_tensor(pos_seqs[:100])
+    shap_values = explainer.shap_values(test_tensor)
+    
+    # 2. Safely extract the numpy array
+    if isinstance(shap_values, (list, tuple)):
+        shap_values = shap_values[0]
+    if hasattr(shap_values, 'detach'):
+        shap_values = shap_values.detach().cpu().numpy()
+        
+    # Force the array into the exact shape we expect: (Samples, 4 nucleotides, 81 base pairs)
+    shap_values = np.array(shap_values).reshape(-1, 4, 81)
+        
+    # Sum SHAP values across the 4 nucleotide channels (axis=1), then average across samples (axis=0)
+    positional_shap = np.abs(shap_values).sum(axis=1).mean(axis=0)
+    
+    # Guarantee it is a flat 1D array of 81 values for matplotlib
+    positional_shap = positional_shap.flatten()
+    
+    plt.figure(figsize=(12, 4))
+    plt.bar(range(81), positional_shap, color='darkblue')
+    plt.title("DeepExplainer Positional Importance (AEI-CNN+BiLSTM)", fontweight='bold')
+    plt.xlabel("Position in Sequence (bp)", fontweight='bold')
+    plt.ylabel("Mean |SHAP Value|", fontweight='bold')
+    plt.xticks([0, 20, 40, 60, 80], ['-60', '-40', '-20', '+1', '+20'])
+    plt.tight_layout()
+    plt.savefig(Path(output_dir) / 'shap_summary_plot.pdf', dpi=400)
+    print("Saved PyTorch SHAP plot.")
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--pos", default="data/dbtbs_positives.txt")
+    parser.add_argument("--neg", default="data/dbtbs_negatives.txt")
+    parser.add_argument("--model-dir", required=True)
+    parser.add_argument("--out-dir", default="figs")
+    args = parser.parse_args()
+    main(args.pos, args.neg, args.model_dir, args.out_dir)
+
+generate_negative_sequences.py
+import random
+from collections import defaultdict
+
+def build_de_bruijn_graph(sequence, k):
+    """Builds a De Bruijn graph from a DNA sequence."""
+    graph = defaultdict(list)
+    in_degree = defaultdict(int)
+    out_degree = defaultdict(int)
+
+    # Create nodes (k-1 mers) and edges (k mers)
+    for i in range(len(sequence) - k + 1):
+        kmer = sequence[i:i+k]
+        prefix = kmer[:-1]
+        suffix = kmer[1:]
+        
+        graph[prefix].append(suffix)
+        out_degree[prefix] += 1
+        in_degree[suffix] += 1
+
+    return graph, in_degree, out_degree
+
+def get_start_node(graph, in_degree, out_degree):
+    """Finds the starting node for the Eulerian path."""
+    start_node = None
+    for node in set(in_degree.keys()).union(set(out_degree.keys())):
+        # In a directed graph, the start node of an Eulerian path has out_degree - in_degree == 1
+        if out_degree[node] - in_degree[node] == 1:
+            return node
+            
+    # If it's a perfect Eulerian circuit (balanced degrees), pick any node with outgoing edges
+    if not start_node:
+        start_node = list(graph.keys())[0]
+    return start_node
+
+def generate_adversarial_negative(sequence, k=3):
+    """
+    Generates a negative sequence with the exact same k-mer frequency 
+    as the input sequence by finding an alternative Eulerian path.
+    """
+    graph, in_degree, out_degree = build_de_bruijn_graph(sequence, k)
+    start_node = get_start_node(graph, in_degree, out_degree)
+
+    # NOVEL STEP: Shuffle the outgoing edges at every node. 
+    # This forces Hierholzer's algorithm to take alternative branches,
+    # destroying long-range structure while preserving k-mer counts.
+    for node in graph:
+        random.shuffle(graph[node])
+
+    # Hierholzer's algorithm to find an Eulerian path
+    stack = [start_node]
+    path = []
+
+    while stack:
+        u = stack[-1]
+        if graph[u]:
+            # If there are unexplored edges, follow one
+            v = graph[u].pop()
+            stack.append(v)
+        else:
+            # If stuck, backtrack and add to path
+            path.append(stack.pop())
+
+    # The path is constructed backwards, so reverse it
+    path = path[::-1]
+
+    # Reconstruct the string from the path of (k-1)-mers
+    if not path:
+        return ""
+        
+    adversarial_seq = path[0]
+    for node in path[1:]:
+        adversarial_seq += node[-1]
+
+    return adversarial_seq
+
+# --- Example Usage on Your Sequence ---
+# if __name__ == "__main__":
+#     # The sequence transcribed from your image
+#     positive_sequence = "TAGAACAGCCTTGTACGGGAGCTGCAATCACCTCTGCTCGTCTCCATTATAGAACACTTG"
+    
+#     print("Original Positive Sequence:")
+#     print(positive_sequence)
+    
+#     # We use k=3 to ensure enough branching points (hubs) in the graph 
+#     # for a 60-bp sequence. For longer sequences, you can use k=4 or k=5.
+#     negative_sequence = generate_adversarial_negative(positive_sequence, k=3)
+    
+#     print("\nGenerated Adversarial Negative Sequence:")
+#     print(negative_sequence)
+
+generate_paper_figures.py
+import argparse
+import joblib
+import pandas as pd
+import numpy as np
+from pathlib import Path
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.metrics import roc_curve, auc, precision_recall_curve, average_precision_score
+import logomaker
+import os
+from dataset_builder import extract_promoter_features
+
+def plot_roc_pr_curves(y_true, y_proba, output_dir):
+    sns.set_style("whitegrid")
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+    
+    fpr, tpr, _ = roc_curve(y_true, y_proba)
+    roc_auc = auc(fpr, tpr)
+    ax1.plot(fpr, tpr, color='darkorange', lw=2, label=f'AEI-LGBM (AUC = {roc_auc:.3f})')
+    ax1.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
+    ax1.set_xlim([0.0, 1.0])
+    ax1.set_ylim([0.0, 1.05])
+    ax1.set_xlabel('False Positive Rate', fontweight='bold')
+    ax1.set_ylabel('True Positive Rate', fontweight='bold')
+    ax1.set_title('ROC Curve (External Benchmark)', fontweight='bold')
+    ax1.legend(loc="lower right")
+
+    precision, recall, _ = precision_recall_curve(y_true, y_proba)
+    ap = average_precision_score(y_true, y_proba)
+    ax2.plot(recall, precision, color='green', lw=2, label=f'AEI-LGBM (AP = {ap:.3f})')
+    ax2.set_xlim([0.0, 1.0])
+    ax2.set_ylim([0.0, 1.05])
+    ax2.set_xlabel('Recall', fontweight='bold')
+    ax2.set_ylabel('Precision', fontweight='bold')
+    ax2.set_title('Precision-Recall Curve (External Benchmark)', fontweight='bold')
+    ax2.legend(loc="lower left")
+    
+    plt.tight_layout()
+    plt.savefig(Path(output_dir) / 'roc_pr_curves.png', dpi=400)
+    print("Saved ROC and PR curves.")
+
+def generate_comparative_logo(pos_file, neg_file, output_dir):
+    """Generates the stacked Positives vs AEI Negatives conservation plot."""
+    with open(pos_file, 'r') as f:
+        pos_seqs = [line.strip().upper() for line in f if line.strip()]
+    with open(neg_file, 'r') as f:
+        neg_seqs = [line.strip().upper() for line in f if line.strip()]
+
+    def get_info_matrix(seqs):
+        seq_len = len(seqs[0])
+        counts = pd.DataFrame(0, index=range(seq_len), columns=['A', 'C', 'G', 'T'])
+        for seq in seqs:
+            for i, base in enumerate(seq[:seq_len]):
+                if base in counts.columns:
+                    counts.loc[i, base] += 1
+        prob_matrix = counts.div(counts.sum(axis=1), axis=0)
+        return logomaker.transform_matrix(prob_matrix, from_type='probability', to_type='information')
+
+    pos_info = get_info_matrix(pos_seqs)
+    neg_info = get_info_matrix(neg_seqs)
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 6), sharex=True, sharey=True)
+
+    logomaker.Logo(pos_info, ax=ax1, color_scheme='classic')
+    ax1.set_title('Universal Prokaryotic Promoters (Positive Set)', fontsize=14, fontweight='bold')
+    ax1.set_ylabel('bits', fontsize=12, fontweight='bold')
+    ax1.set_ylim([0, 2.0])
+
+    logomaker.Logo(neg_info, ax=ax2, color_scheme='classic')
+    ax2.set_title('De Bruijn AEI Non-Promoters (Negative Set)', fontsize=14, fontweight='bold')
+    ax2.set_ylabel('bits', fontsize=12, fontweight='bold')
+    ax2.set_xlabel('Sequence Position', fontsize=12, fontweight='bold')
+
+    plt.tight_layout()
+    plt.savefig(Path(output_dir) / 'comparative_sequence_logo.png', dpi=400)
+    print("Saved Comparative Sequence Logo.")
+
+def main(ext_pos, ext_neg, train_pos, train_neg, model_dir, output_dir):
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    
+    model = joblib.load(Path(model_dir) / "best_model.pkl")
+    feature_cols = joblib.load(Path(model_dir) / "feature_columns.pkl")
+    
+    with open(ext_pos, 'r') as f:
+        pos_seqs = [line.strip() for line in f if line.strip()]
+    with open(ext_neg, 'r') as f:
+        neg_seqs = [line.strip() for line in f if line.strip()]
+        
+    all_seqs = pos_seqs + neg_seqs
+    y_true = np.array([1]*len(pos_seqs) + [0]*len(neg_seqs))
+    
+    features_list = [extract_promoter_features(seq) for seq in all_seqs]
+    df = pd.DataFrame(features_list).reindex(columns=feature_cols, fill_value=0)
+    
+    y_proba = model.predict(df)
+    
+    plot_roc_pr_curves(y_true, y_proba, output_dir)
+    
+    # Generate the comparative logo using the training data files
+    if train_pos and train_neg:
+        generate_comparative_logo(train_pos, train_neg, output_dir)
+        
+    print(f"Successfully generated paper figures in '{output_dir}'.")
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    # External test sets for ROC/PR curves
+    parser.add_argument("--ext-pos", type=str, default="data/dbtbs_positives.txt")
+    parser.add_argument("--ext-neg", type=str, default="data/dbtbs_negatives.txt")
+    
+    # Training sets for Comparative Logo
+    parser.add_argument("--train-pos", type=str, help="e.g., data/gplus.txt")
+    parser.add_argument("--train-neg", type=str, help="e.g., data/gplus_negative.txt")
+    
+    parser.add_argument("--model-dir", type=str, required=True)
+    parser.add_argument("--out-dir", type=str, default="figs2")
+
+    args = parser.parse_args()
+
+    main(args.ext_pos, args.ext_neg, args.train_pos, args.train_neg, args.model_dir, args.out_dir)
+
+generate_paper_figures2.py
+import argparse
+import pandas as pd
+import numpy as np
+from pathlib import Path
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.metrics import roc_curve, auc, precision_recall_curve, average_precision_score
+import logomaker
+import os
+import torch
+import torch.nn as nn
+
+# 1. Define the PyTorch Model Blueprint
+class CNN_BiLSTM(nn.Module):
+    def __init__(self):
+        super(CNN_BiLSTM, self).__init__()
+        self.conv = nn.Conv1d(4, 128, 15)
+        self.relu = nn.ReLU()
+        self.pool = nn.MaxPool1d(5)
+        self.dropout1 = nn.Dropout(0.2)
+        self.lstm = nn.LSTM(128, 32, bidirectional=True, batch_first=True)
+        self.dropout2 = nn.Dropout(0.5)
+        self.fc = nn.Linear(64, 1)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        x = self.dropout1(self.pool(self.relu(self.conv(x))))
+        x = x.transpose(1, 2)
+        x, _ = self.lstm(x)
+        return self.sigmoid(self.fc(self.dropout2(x[:, -1, :])))
+
+# 2. Define the Tensor Encoder
+def get_onehot_tensor(seqs):
+    mapping = {'A': [1,0,0,0], 'C': [0,1,0,0], 'G': [0,0,1,0], 'T': [0,0,0,1]}
+    tensors = [np.array([mapping.get(b, [0.25]*4) for b in s]).T for s in seqs]
+    return torch.tensor(np.array(tensors), dtype=torch.float32)
+
+def generate_3panel_logos(pos_train_file, bio_neg_file, aei_neg_file, output_dir):
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    
+    def get_info_matrix(file_path):
+        with open(file_path, 'r') as f:
+            seqs = [line.strip().upper() for line in f if len(line.strip()) == 81]
+        counts = pd.DataFrame(0, index=range(81), columns=['A', 'C', 'G', 'T'])
+        for seq in seqs:
+            for i, base in enumerate(seq[:81]):
+                if base in counts.columns:
+                    counts.loc[i, base] += 1
+        prob_matrix = counts.div(counts.sum(axis=1), axis=0)
+        return logomaker.transform_matrix(prob_matrix, from_type='probability', to_type='information')
+
+    # 1. Positive Training Logo
+    fig, ax1 = plt.subplots(figsize=(10, 3))
+    logomaker.Logo(get_info_matrix(pos_train_file), ax=ax1, color_scheme='classic')
+    ax1.set_title('True Gram-Positive Promoters (Positive Set)', fontweight='bold')
+    ax1.set_ylabel('bits', fontweight='bold')
+    ax1.set_ylim([0, 2.0])
+    plt.tight_layout()
+    plt.savefig(Path(output_dir) / 'logo_1_positive.pdf', dpi=600)
+    plt.close()
+
+    # 2. Biological Genomic Background Logo
+    fig, ax2 = plt.subplots(figsize=(10, 3))
+    logomaker.Logo(get_info_matrix(bio_neg_file), ax=ax2, color_scheme='classic')
+    ax2.set_title('Biological Genomic Background (Traditional Negatives)', fontweight='bold')
+    ax2.set_ylabel('bits', fontweight='bold')
+    ax2.set_ylim([0, 2.0])
+    plt.tight_layout()
+    plt.savefig(Path(output_dir) / 'logo_2_bio_negative.pdf', dpi=600)
+    plt.close()
+
+    # 3. AEI Engineered Background Logo
+    fig, ax3 = plt.subplots(figsize=(10, 3))
+    logomaker.Logo(get_info_matrix(aei_neg_file), ax=ax3, color_scheme='classic')
+    ax3.set_title('De Bruijn AEI Engineered Negatives (Proposed)', fontweight='bold')
+    ax3.set_ylabel('bits', fontweight='bold')
+    ax3.set_xlabel('Sequence Position', fontweight='bold')
+    ax3.set_ylim([0, 2.0])
+    plt.tight_layout()
+    plt.savefig(Path(output_dir) / 'logo_3_aei_negative.pdf', dpi=600)
+    plt.close()
+    print("Saved 3-panel logos separately.")
+
+def plot_true_positive_logo(tp_seqs, output_dir):
+    if not tp_seqs:
+        print("No True Positives found to plot logo.")
+        return
+        
+    counts = pd.DataFrame(0, index=range(81), columns=['A', 'C', 'G', 'T'])
+    for seq in tp_seqs:
+        for i, base in enumerate(seq):
+            if base in counts.columns:
+                counts.loc[i, base] += 1
+                
+    prob_matrix = counts.div(counts.sum(axis=1), axis=0)
+    info_matrix = logomaker.transform_matrix(prob_matrix, from_type='probability', to_type='information')
+    
+    fig, ax = plt.subplots(1, 1, figsize=(16, 4))
+    logomaker.Logo(info_matrix, ax=ax, color_scheme='classic')
+    
+    ax.axvspan(20, 26, color='red', alpha=0.1, label='-35 Box Region')
+    ax.axvspan(44, 50, color='blue', alpha=0.1, label='-10 Box Region')
+    
+    ax.set_title("Sequence Logo of External True Positives (Successfully Predicted)", fontweight='bold', fontsize=16)
+    ax.set_ylabel("Information (bits)", fontweight='bold', fontsize=12)
+    ax.set_xlabel("Position (bp)", fontweight='bold', fontsize=12)
+    ax.legend(loc='upper right')
+    
+    plt.tight_layout()
+    plt.savefig(Path(output_dir) / 'true_positive_sequence_logo.pdf', dpi=400)
+    print("Saved True Positive Sequence Logo.")
+
+def plot_roc_curve(y_true, y_proba, output_dir):
+    sns.set_style("whitegrid")
+    plt.figure(figsize=(7, 6))
+    fpr, tpr, _ = roc_curve(y_true, y_proba)
+    roc_auc = auc(fpr, tpr)
+    
+    plt.plot(fpr, tpr, color='darkorange', lw=2.5, label=f'AEI-CNN+BiLSTM (AUC = {roc_auc:.3f})')
+    plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
+    plt.xlim([0.0, 1.0])
+    plt.ylim([0.0, 1.05])
+    plt.xlabel('False Positive Rate', fontweight='bold', fontsize=12)
+    plt.ylabel('True Positive Rate', fontweight='bold', fontsize=12)
+    plt.title('ROC Curve (External Benchmark)', fontweight='bold', fontsize=14)
+    plt.legend(loc="lower right", fontsize=11)
+    
+    plt.tight_layout()
+    plt.savefig(Path(output_dir) / 'roc_curve.pdf', dpi=600)
+    plt.close()
+
+def plot_pr_curve(y_true, y_proba, output_dir):
+    sns.set_style("whitegrid")
+    plt.figure(figsize=(7, 6))
+    precision, recall, _ = precision_recall_curve(y_true, y_proba)
+    ap = average_precision_score(y_true, y_proba)
+    
+    plt.plot(recall, precision, color='green', lw=2.5, label=f'AEI-CNN+BiLSTM (AP = {ap:.3f})')
+    plt.xlim([0.0, 1.0])
+    plt.ylim([0.0, 1.05])
+    plt.xlabel('Recall', fontweight='bold', fontsize=12)
+    plt.ylabel('Precision', fontweight='bold', fontsize=12)
+    plt.title('Precision-Recall Curve', fontweight='bold', fontsize=14)
+    plt.legend(loc="lower left", fontsize=11)
+    
+    plt.tight_layout()
+    plt.savefig(Path(output_dir) / 'pr_curve.pdf', dpi=600)
+    plt.close()
+
+def main(ext_pos, ext_neg, train_pos, train_neg, model_dir, output_dir):
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    
+    # 3. Load PyTorch Model properly
+    model = CNN_BiLSTM()
+    model.load_state_dict(torch.load(Path(model_dir) / "best_model.pt", map_location=torch.device('cpu')))
+    model.eval()
+    
+    with open(ext_pos, 'r') as f:
+        pos_seqs = [line.strip() for line in f if len(line.strip()) == 81]
+    with open(ext_neg, 'r') as f:
+        neg_seqs = [line.strip() for line in f if len(line.strip()) == 81]
+        
+    all_seqs = pos_seqs + neg_seqs
+    y_true = np.array([1]*len(pos_seqs) + [0]*len(neg_seqs))
+    
+    # 4. Convert to tensors and predict
+    X = get_onehot_tensor(all_seqs)
+    with torch.no_grad():
+        y_proba = model(X).squeeze().numpy()
+    
+    # Calculate Optimal Threshold dynamically
+    fpr, tpr, thresholds = roc_curve(y_true, y_proba)
+    optimal_idx = np.argmax(tpr - fpr)
+    optimal_threshold = thresholds[optimal_idx]
+    print(f"Plotting using Optimal Threshold: {optimal_threshold:.4f}")
+    y_pred = (y_proba >= optimal_threshold).astype(int)
+    
+    # Isolate the sequences that were Positive AND the model predicted Positive
+    tp_seqs = [pos_seqs[i] for i in range(len(pos_seqs)) if y_pred[i] == 1]
+    
+    plot_roc_curve(y_true, y_proba, output_dir)
+    plot_pr_curve(y_true, y_proba, output_dir)
+    plot_true_positive_logo(tp_seqs, output_dir)
+
+    if train_pos and train_neg:
+        generate_3panel_logos(train_pos, ext_neg, train_neg, output_dir)
+        
+    print(f"Successfully generated all paper figures in '{output_dir}'.")
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--ext-pos", type=str, default="data/cnnprom_positive.txt")
+    parser.add_argument("--ext-neg", type=str, default="data/cnnprom_negative.txt")
+    parser.add_argument("--train-pos", type=str, help="e.g., data/gplusd_positive.txt")
+    parser.add_argument("--train-neg", type=str, help="e.g., data/gplusd_negative.txt")
+    parser.add_argument("--model-dir", type=str, required=True)
+    parser.add_argument("--out-dir", type=str, default="figs")
+    
+    args = parser.parse_args()
+    main(args.ext_pos, args.ext_neg, args.train_pos, args.train_neg, args.model_dir, args.out_dir)
+
+generate_shap_plots.py
+import argparse
+import numpy as np
+import pandas as pd
+from pathlib import Path
+import matplotlib.pyplot as plt
+import shap
+import torch
+import torch.nn as nn
+
+# 1. Define the model blueprint
+class CNN_BiLSTM(nn.Module):
+    def __init__(self):
+        super(CNN_BiLSTM, self).__init__()
+        self.conv = nn.Conv1d(4, 128, 15)
+        self.relu = nn.ReLU()
+        self.pool = nn.MaxPool1d(5)
+        self.dropout1 = nn.Dropout(0.2)
+        self.lstm = nn.LSTM(128, 32, bidirectional=True, batch_first=True)
+        self.dropout2 = nn.Dropout(0.5)
+        self.fc = nn.Linear(64, 1)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        x = self.dropout1(self.pool(self.relu(self.conv(x))))
+        x = x.transpose(1, 2)
+        x, _ = self.lstm(x)
+        return self.sigmoid(self.fc(self.dropout2(x[:, -1, :])))
+
+# 2. Define the tensor encoder
+def get_onehot_tensor(seqs):
+    mapping = {'A': [1,0,0,0], 'C': [0,1,0,0], 'G': [0,0,1,0], 'T': [0,0,0,1]}
+    tensors = [np.array([mapping.get(b, [0.25]*4) for b in s]).T for s in seqs]
+    return torch.tensor(np.array(tensors), dtype=torch.float32)
+
+def main(pos_path, neg_path, model_dir, output_dir):
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    
+    print(f"Loading PyTorch model from {model_dir}...")
+    model = CNN_BiLSTM()
+    model.load_state_dict(torch.load(Path(model_dir) / "best_model.pt", map_location=torch.device('cpu')))
+    model.eval()
+    
+    print("Loading external sequences...")
+    with open(pos_path, 'r') as f:
+        pos_seqs = [line.strip() for line in f if len(line.strip()) == 81]
+    with open(neg_path, 'r') as f:
+        neg_seqs = [line.strip() for line in f if len(line.strip()) == 81]
+        
+    print("Converting sequences to PyTorch tensors...")
+    # SHAP is computationally heavy for Deep Learning. 
+    # We use 100 negatives as a baseline background, and evaluate 200 positive predictions.
+    bg_tensor = get_onehot_tensor(neg_seqs[:100])
+    test_tensor = get_onehot_tensor(pos_seqs[:200])
+    
+    print("Calculating SHAP values via GradientExplainer (this might take a minute)...")
+    explainer = shap.GradientExplainer(model, bg_tensor)
+    shap_values = explainer.shap_values(test_tensor)
+    
+    if isinstance(shap_values, list):
+        shap_vals = shap_values[0]
+    else:
+        shap_vals = shap_values
+        
+    # SHAP outputs shape (Samples, 4 channels, 81 bp). 
+    # We sum the absolute SHAP values across the 4 nucleotide channels to get the importance of the POSITION itself.
+    positional_shap = np.sum(np.abs(shap_vals), axis=1)
+    
+    # Create labels mapping to the 0-80 indices
+    feature_names = [f"Position {i}" for i in range(81)]
+    df_features = pd.DataFrame(np.zeros((len(test_tensor), 81)), columns=feature_names)
+
+    print("Generating SHAP Summary Plot...")
+    plt.figure(figsize=(12, 8))
+    
+    shap.summary_plot(
+        positional_shap, 
+        df_features, 
+        max_display=20,  # Show top 20 most important positional coordinates
+        show=False,
+        plot_size=(12, 8)
+    )
+    
+    plt.title("SHAP Positional Importance: AEI-CNN+BiLSTM", fontweight='bold', fontsize=16, pad=20)
+    plt.tight_layout()
+    
+    output_path = Path(output_dir) / 'shap_summary_plot.pdf'
+    plt.savefig(output_path, dpi=400, bbox_inches='tight')
+    print(f"Saved SHAP plot to: {output_path}")
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--pos", type=str, default="data/cnnprom_positive.txt", help="External positives")
+    parser.add_argument("--neg", type=str, default="data/cnnprom_negative.txt", help="External negatives")
+    parser.add_argument("--model-dir", type=str, required=True, help="Directory with best_model.pt")
+    parser.add_argument("--out-dir", type=str, default="figs", help="Output directory for plots")
+
+    args = parser.parse_args()
+    main(args.pos, args.neg, args.model_dir, args.out_dir)
+
+inference.py
+import argparse
+import joblib
+import pandas as pd
+from pathlib import Path
+from dataset_builder import extract_promoter_features
+
+def infer(data_path, model_dir):
+    model = joblib.load(Path(model_dir) / "best_model.pkl")
+    feature_cols = joblib.load(Path(model_dir) / "feature_columns.pkl")
+    
+    with open(data_path, 'r') as f:
+        sequences = [line.strip() for line in f if line.strip()]
+        
+    print(f"Running inference on {len(sequences)} sequences...")
+    
+    # Extract features for new sequences
+    features_list = [extract_promoter_features(seq) for seq in sequences]
+    df = pd.DataFrame(features_list)
+    
+    # Ensure columns match training exactly
+    df = df.reindex(columns=feature_cols, fill_value=0)
+    
+    # Predict
+    probabilities = model.predict(df)
+    predictions = (probabilities >= 0.5).astype(int)
+    
+    with open("infer_results.txt", "w") as f:
+        for seq, prob, pred in zip(sequences, probabilities, predictions):
+            f.write(f"Seq: {seq[:10]}... | Prob: {prob:.4f} | Class: {pred}\n")
+            
+    print("Results saved to infer_results.txt")
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-d", "--data", type=str, required=True, help="path to sequences to predict (txt file)")
+    parser.add_argument("-m", "--model-dir", type=str, required=True, help="directory containing best_model.pkl")
+    args = parser.parse_args()
+
+    infer(args.data, args.model_dir)
+
+models.py
+import torch
+from torch import nn
+
+class ParallelCNN(nn.Module):
+    def __init__(self, para_ker, pool_kernel=6, drop=0.5):
+        super().__init__()
+        self.lseq = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv1d(4, 4, kernel_size=k, padding="same"),
+                nn.ReLU(),
+                nn.MaxPool1d(pool_kernel),
+                nn.Dropout(drop)
+            ) for k in para_ker
+        ])
+
+    def forward(self, inputs):
+        return torch.cat([seq(inputs) for seq in self.lseq], dim=1)
+
+
+class BidirectionalLSTM(nn.Module):
+    def __init__(self, input_size, hidden_size, output_size):
+        super().__init__()
+        self.rnn = nn.LSTM(input_size, hidden_size, bidirectional=True, batch_first=True)
+        self.linear = nn.Linear(hidden_size * 2, output_size)
+
+    def forward(self, inputs):
+        self.rnn.flatten_parameters()
+        recurrent, _ = self.rnn(inputs)
+        return self.linear(recurrent)
+
+
+class GPlusD(nn.Module):
+    def __init__(self, para_ker, input_shape=(64, 81, 4), pool_kernel=6, drop=0.5):
+        super().__init__()
+        binode = len(para_ker) * 4
+
+        self.pconv = ParallelCNN(para_ker, pool_kernel, drop)
+        self.bilstm = BidirectionalLSTM(binode, binode, binode)
+        self.flatten = nn.Flatten()
+        
+        flat_dim = self._get_feature_shape(input_shape)
+
+        self.fc = nn.Sequential(
+            nn.Linear(flat_dim, flat_dim),
+            nn.ReLU(),
+            nn.Linear(flat_dim, 2),
+            nn.Softmax(dim=1)
+        )
+
+    def _get_feature_shape(self, shape):
+        with torch.no_grad():
+            x = torch.zeros(shape).permute(0, 2, 1)
+            x = self.pconv(x).permute(0, 2, 1)
+            x = self.bilstm(x)
+            return self.flatten(x).shape[1]
+
+    def forward(self, x):
+        x = self.pconv(x.permute(0, 2, 1)).permute(0, 2, 1)
+        x = self.bilstm(x)
+        return self.fc(self.flatten(x))
+
+prepare_external_benchmark_data.py
+import argparse
+import os
+import random
+from Bio import Entrez, SeqIO
+from pathlib import Path
+
+# Entrez requires an email to know who is querying their servers
+Entrez.email = "faith508@iastate.edu" 
+
+def generate_external_dataset(pos_out="data/cnnprom_positive.txt", neg_out="data/cnnprom_negative.txt", seq_length=81):
+    os.makedirs("data", exist_ok=True)
+    
+    print("Fetching Bacillus subtilis reference genome (NC_000964.3) directly from NCBI...")
+    try:
+        # Fetch the full annotated GenBank file
+        handle = Entrez.efetch(db="nucleotide", id="NC_000964.3", rettype="gbwithparts", retmode="text")
+        record = SeqIO.read(handle, "genbank")
+        handle.close()
+    except Exception as e:
+        print(f"Failed to fetch from NCBI. Error: {e}")
+        return
+
+    genome_seq = record.seq
+    positives = []
+    
+    print(f"Length of genome fetched from NCBI >>> {len(genome_seq)}")
+    print("Extracting upstream regulatory regions (-60 to +20) for all CDS...")
+    
+    # Extract upstream regions of annotated genes as presumed true promoters
+    for feature in record.features:
+        if feature.type == "CDS":
+            # FIXED: Access strand through feature.location
+            if feature.location.strand == 1: # Forward strand
+                tss = feature.location.start
+                start = tss - 60
+                end = tss + 21
+                if start >= 0:
+                    seq = str(genome_seq[start:end]).upper()
+                    if len(seq) == seq_length and 'N' not in seq:
+                        positives.append(seq)
+            elif feature.location.strand == -1: # Reverse strand
+                tss = feature.location.end
+                start = tss - 21
+                end = tss + 60
+                if end <= len(genome_seq):
+                    # Remember to reverse complement the reverse strand!
+                    seq = str(genome_seq[start:end].reverse_complement()).upper()
+                    if len(seq) == seq_length and 'N' not in seq:
+                        positives.append(seq)
+                        
+    # Save Positives
+    with open(pos_out, "w") as f:
+        for seq in positives:
+            f.write(f"{seq}\n")
+    print(f"Saved {len(positives)} putative promoters to {pos_out}")
+
+    # Generate Negatives
+    print("Generating background genomic negatives...")
+    negatives = []
+    genome_str = str(genome_seq).upper()
+    
+    while len(negatives) < len(positives):
+        start = random.randint(0, len(genome_str) - seq_length)
+        chunk = genome_str[start:start+seq_length]
+        if 'N' not in chunk:
+            negatives.append(chunk)
+            
+    with open(neg_out, "w") as f:
+        for seq in negatives:
+            f.write(f"{seq}\n")
+    print(f"Saved {len(negatives)} real genome background sequences to {neg_out}")
+    print("External dataset preparation complete!")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Prepare external benchmark dataset for CNNProm.")
+    parser.add_argument("--pos-out", type=str, default="data/cnnprom_positive.txt", help="Output file for positive sequences")
+    parser.add_argument("--neg-out", type=str, default="data/cnnprom_negative.txt", help="Output file for negative sequences")
+    parser.add_argument("--seq-length", type=int, default=81, help="Length of sequences to extract")
+    args = parser.parse_args()
+
+    generate_external_dataset(pos_out=args.pos_out, neg_out=args.neg_out, seq_length=args.seq_length)
+
+
+run_ablation_experiment.py
+import random
+import numpy as np
+import pandas as pd
+import joblib
+import matplotlib.pyplot as plt
+import seaborn as sns
+from pathlib import Path
+from sklearn.metrics import roc_curve, auc, precision_recall_curve, average_precision_score, matthews_corrcoef, precision_score, recall_score
+from dataset_builder import extract_promoter_features
+from generate_negative_sequences import generate_adversarial_negative
+
+def random_shuffle_seq(seq):
+    """Method 1: Complete mononucleotide random shuffle."""
+    seq_list = list(seq)
+    random.shuffle(seq_list)
+    return "".join(seq_list)
+
+def block_shuffle_seq(seq, num_blocks=10, shuffle_ratio=0.6):
+    """Method 2: DeePromoter-style block segmentation and partial shuffling."""
+    block_size = len(seq) // num_blocks
+    blocks = [seq[i*block_size:(i+1)*block_size] for i in range(num_blocks)]
+    
+    num_to_shuffle = int(num_blocks * shuffle_ratio)
+    indices_to_shuffle = random.sample(range(num_blocks), num_to_shuffle)
+    
+    shuffled_sub_blocks = [blocks[i] for i in indices_to_shuffle]
+    random.shuffle(shuffled_sub_blocks)
+    
+    for idx, new_block in zip(indices_to_shuffle, shuffled_sub_blocks):
+        blocks[idx] = new_block
+        
+    return "".join(blocks)
+
+def build_dataset(pos_seqs, neg_gen_func):
+    neg_seqs = [neg_gen_func(s) for s in pos_seqs]
+    all_seqs = pos_seqs + neg_seqs
+    y = np.array([1]*len(pos_seqs) + [0]*len(neg_seqs))
+    
+    features = [extract_promoter_features(s) for s in all_seqs]
+    df = pd.DataFrame(features)
+    return df, y
+
+def run_ablation(train_pos_path, ext_pos_path, ext_neg_path, output_dir="docs/ablation"):
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    random.seed(42)
+    
+    with open(train_pos_path, 'r') as f:
+        train_pos = [l.strip().upper() for l in f if len(l.strip()) == 81]
+    with open(ext_pos_path, 'r') as f:
+        ext_pos = [l.strip().upper() for l in f if len(l.strip()) == 81]
+    with open(ext_neg_path, 'r') as f:
+        ext_neg = [l.strip().upper() for l in f if len(l.strip()) == 81]
+
+    methods = {
+        'AEI (Proposed, k=5)': lambda s: generate_adversarial_negative(s, k=5) or s,
+        'Random Mononucleotide Shuffle': random_shuffle_seq,
+        'Block Permutation (DeePromoter-style)': lambda s: block_shuffle_seq(s, num_blocks=10, shuffle_ratio=0.6)
+    }
+
+    ext_all = ext_pos + ext_neg
+    y_ext = np.array([1]*len(ext_pos) + [0]*len(ext_neg))
+    X_ext = pd.DataFrame([extract_promoter_features(s) for s in ext_all])
+
+    results = []
+    
+    plt.figure(figsize=(14, 6))
+    ax1 = plt.subplot(1, 2, 1)
+    ax2 = plt.subplot(1, 2, 2)
+
+    for name, gen_func in methods.items():
+        print(f"Running ablation for method: {name}...")
+        X_train, y_train = build_dataset(train_pos, gen_func)
+        
+        # Align columns
+        X_ext_aligned = X_ext.reindex(columns=X_train.columns, fill_value=0)
+        
+        # Train LightGBM model
+        import lightgbm as lgb
+        clf = lgb.LGBMClassifier(n_estimators=100, learning_rate=0.1, max_depth=6, random_state=42, verbose=-1)
+        clf.fit(X_train, y_train)
+        
+        # Evaluate on unseen External Benchmark
+        y_proba = clf.predict_proba(X_ext_aligned)[:, 1]
+        
+        # Calculate curves
+        fpr, tpr, thresholds = roc_curve(y_ext, y_proba)
+        roc_auc = auc(fpr, tpr)
+        
+        precision_vals, recall_vals, _ = precision_recall_curve(y_ext, y_proba)
+        ap = average_precision_score(y_ext, y_proba)
+        
+        # Optimal threshold metrics
+        optimal_idx = np.argmax(tpr - fpr)
+        opt_thresh = thresholds[optimal_idx]
+        y_pred = (y_proba >= opt_thresh).astype(int)
+        
+        mcc = matthews_corrcoef(y_ext, y_pred)
+        prec = precision_score(y_ext, y_pred)
+        rec = recall_score(y_ext, y_pred)
+        
+        results.append({
+            'Strategy': name,
+            'AUC': roc_auc,
+            'AP': ap,
+            'MCC': mcc,
+            'Precision': prec,
+            'Recall': rec,
+            'Optimal Thresh': opt_thresh
+        })
+        
+        # Plot ROC & PR
+        ax1.plot(fpr, tpr, lw=2, label=f'{name} (AUC = {roc_auc:.3f})')
+        ax2.plot(recall_vals, precision_vals, lw=2, label=f'{name} (AP = {ap:.3f})')
+
+    ax1.plot([0, 1], [0, 1], 'k--', lw=1.5)
+    ax1.set_xlabel('False Positive Rate', fontweight='bold')
+    ax1.set_ylabel('True Positive Rate', fontweight='bold')
+    ax1.set_title('ROC Curve Comparison Across Negative Controls', fontweight='bold')
+    ax1.legend(loc='lower right', fontsize=9)
+
+    ax2.set_xlabel('Recall', fontweight='bold')
+    ax2.set_ylabel('Precision', fontweight='bold')
+    ax2.set_title('Precision-Recall Curve Comparison Across Controls', fontweight='bold')
+    ax2.legend(loc='lower left', fontsize=9)
+
+    plt.tight_layout()
+    plt.savefig(Path(output_dir) / 'negative_sampling_ablation.png', dpi=600)
+    
+    df_res = pd.DataFrame(results)
+    print("\n" + "="*60)
+    print("ABLATION STUDY RESULTS (EXTERNAL DBTBS BENCHMARK)")
+    print("="*60)
+    print(df_res.to_string(index=False))
+    return df_res
+
+if __name__ == '__main__':
+    run_ablation('data/gplus.txt', 'data/dbtbs_positives.txt', 'data/dbtbs_negatives.txt')
+
+run_sota_comparison.py
+import argparse
+import numpy as np
+import pandas as pd
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import TensorDataset, DataLoader
+import lightgbm as lgb
+from xgboost import XGBClassifier
+from sklearn.svm import SVC
+from sklearn.calibration import CalibratedClassifierCV
+from sklearn.metrics import roc_curve, roc_auc_score, matthews_corrcoef, precision_score, recall_score
+from dataset_builder import extract_promoter_features
+
+# --- 1. DEEP LEARNING ARCHITECTURE (PyTorch) ---
+class CNN_BiLSTM(nn.Module):
+    def __init__(self):
+        super(CNN_BiLSTM, self).__init__()
+        self.conv = nn.Conv1d(in_channels=4, out_channels=128, kernel_size=15)
+        self.relu = nn.ReLU()
+        self.pool = nn.MaxPool1d(kernel_size=5)
+        self.dropout1 = nn.Dropout(0.2)
+        # Bidirectional LSTM: 128 input features, 32 hidden size -> 64 output size
+        self.lstm = nn.LSTM(input_size=128, hidden_size=32, bidirectional=True, batch_first=True)
+        self.dropout2 = nn.Dropout(0.5)
+        self.fc = nn.Linear(64, 1)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        x = self.conv(x)
+        x = self.relu(x)
+        x = self.pool(x)
+        x = self.dropout1(x)
+        x = x.transpose(1, 2) # Swap dimensions for LSTM (batch, seq_len, features)
+        x, _ = self.lstm(x)
+        x = x[:, -1, :] # Take the output of the last time step
+        x = self.dropout2(x)
+        x = self.fc(x)
+        return self.sigmoid(x).squeeze()
+
+def get_onehot_tensor(seqs):
+    mapping = {'A': [1,0,0,0], 'C': [0,1,0,0], 'G': [0,0,1,0], 'T': [0,0,0,1]}
+    tensors = []
+    for seq in seqs:
+        encoded = [mapping.get(base, [0.25,0.25,0.25,0.25]) for base in seq]
+        tensors.append(np.array(encoded).T) # Shape: (4, seq_len)
+    return torch.tensor(np.array(tensors), dtype=torch.float32)
+
+# --- 2. PIPELINE FUNCTIONS ---
+def evaluate_model(y_true, y_proba, model_name):
+    auc = roc_auc_score(y_true, y_proba)
+    fpr, tpr, thresholds = roc_curve(y_true, y_proba)
+    optimal_idx = np.argmax(tpr - fpr)
+    optimal_threshold = thresholds[optimal_idx]
+    
+    y_pred = (y_proba >= optimal_threshold).astype(int)
+    mcc = matthews_corrcoef(y_true, y_pred)
+    precision = precision_score(y_true, y_pred, zero_division=0)
+    recall = recall_score(y_true, y_pred, zero_division=0)
+    
+    return {'Model': model_name, 'Precision': precision, 'Recall': recall, 'MCC': mcc, 'AUC': auc}
+
+def train_pytorch_model(model_name, train_seqs, y_train_labels, test_tensor, y_test, epochs=25):
+    print(f"Training {model_name}...")
+    X_train_tensor = get_onehot_tensor(train_seqs)
+    y_train_tensor = torch.tensor(y_train_labels, dtype=torch.float32)
+    
+    dataset = TensorDataset(X_train_tensor, y_train_tensor)
+    loader = DataLoader(dataset, batch_size=64, shuffle=True)
+    
+    model = CNN_BiLSTM()
+    criterion = nn.BCELoss()
+    optimizer = optim.AdamW(model.parameters(), lr=1e-3)
+    
+    model.train()
+    for epoch in range(epochs): 
+        for batch_X, batch_y in loader:
+            optimizer.zero_grad()
+            outputs = model(batch_X)
+            loss = criterion(outputs, batch_y)
+            loss.backward()
+            optimizer.step()
+            
+    model.eval()
+    with torch.no_grad():
+        y_proba = model(test_tensor).numpy()
+    return evaluate_model(y_test, y_proba, model_name)
+
+def run_experiment(args):
+    def load_seqs(path):
+        with open(path, 'r') as f:
+            return [line.strip().upper() for line in f if len(line.strip()) == 81]
+
+    train_pos = load_seqs(args.train_pos)
+    train_neg_std = load_seqs(args.train_neg_std)
+    train_neg_aei = load_seqs(args.train_neg_aei)
+    test_pos = load_seqs(args.test_pos)
+    test_neg = load_seqs(args.test_neg)
+
+    y_test = np.array([1]*len(test_pos) + [0]*len(test_neg))
+    test_seqs = test_pos + test_neg
+    X_test_tab = pd.DataFrame([extract_promoter_features(s) for s in test_seqs]).fillna(0)
+    X_test_tensor = get_onehot_tensor(test_seqs)
+
+    results = []
+
+    # --- AEI DATA PREPARATION ---
+    y_train_aei = np.array([1]*len(train_pos) + [0]*len(train_neg_aei))
+    X_train_aei_tab = pd.DataFrame([extract_promoter_features(s) for s in train_pos + train_neg_aei]).fillna(0)
+    
+    # --- MODEL 1: AEI-LightGBM ---
+    print("Training AEI-LightGBM...")
+    lgbm = lgb.LGBMClassifier(n_estimators=100, learning_rate=0.1, max_depth=6, random_state=42, verbose=-1)
+    lgbm.fit(X_train_aei_tab, y_train_aei)
+    y_proba_lgbm = lgbm.predict_proba(X_test_tab)[:, 1]
+    results.append(evaluate_model(y_test, y_proba_lgbm, "AEI-LightGBM"))
+
+    # --- MODEL 2: AEI-CNN+BiLSTM (NEW!) ---
+    res_cnn_aei = train_pytorch_model("AEI-CNN+BiLSTM", train_pos + train_neg_aei, y_train_aei, X_test_tensor, y_test)
+    results.append(res_cnn_aei)
+
+    # --- STANDARD DATA PREPARATION ---
+    y_train_std = np.array([1]*len(train_pos) + [0]*len(train_neg_std))
+    X_train_std_tab = pd.DataFrame([extract_promoter_features(s) for s in train_pos + train_neg_std]).fillna(0)
+    X_test_tab = X_test_tab.reindex(columns=X_train_std_tab.columns, fill_value=0)
+
+    # --- MODEL 3: XGBoost (Standard) ---
+    print("Training XGBoost (Standard Negatives)...")
+    xgb = XGBClassifier(n_estimators=100, learning_rate=0.1, max_depth=6, eval_metric='logloss', random_state=42)
+    xgb.fit(X_train_std_tab, y_train_std)
+    y_proba_xgb = xgb.predict_proba(X_test_tab)[:, 1]
+    results.append(evaluate_model(y_test, y_proba_xgb, "Standard-XGBoost"))
+
+    # --- MODEL 4: SVC (Standard) ---
+    print("Training SVC (Standard Negatives)...")
+    base_svc = SVC(kernel='rbf', random_state=42)
+    svc = CalibratedClassifierCV(base_svc, ensemble=False)
+    svc.fit(X_train_std_tab, y_train_std)
+    y_proba_svc = svc.predict_proba(X_test_tab)[:, 1]
+    results.append(evaluate_model(y_test, y_proba_svc, "Standard-SVC (RBF)"))
+
+    # --- MODEL 5: CNN+BiLSTM (Standard) ---
+    res_cnn_std = train_pytorch_model("Standard-CNN+BiLSTM", train_pos + train_neg_std, y_train_std, X_test_tensor, y_test)
+    results.append(res_cnn_std)
+
+    # --- OUTPUT EXACT LATEX TABLE METRICS ---
+    print("\n" + "="*80)
+    print("ULTIMATE SOTA COMPARISON METRICS (DBTBS BENCHMARK)")
+    print("="*80)
+    df_results = pd.DataFrame(results)
+    print(df_results.to_string(index=False, float_format="%.3f"))
+    print("="*80)
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--train-pos", required=True)
+    parser.add_argument("--train-neg-std", required=True)
+    parser.add_argument("--train-neg-aei", required=True)
+    parser.add_argument("--test-pos", required=True)
+    parser.add_argument("--test-neg", required=True)
+    args = parser.parse_args()
+    run_experiment(args)
+
+test.py
+import math
+import argparse
+
+import torch
+from icecream import ic
+from sklearn.metrics import confusion_matrix
+
+from models import GPlusD
+from dataloader import load_data_test
+
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+
+def evaluate(net, loaders):
+    eval_result = list()
+    ltotal = list()
+    lcorrect = list()
+    pred_result = list()
+    true_result = list()
+    for load in loaders:
+        total = 0
+        correct = 0
+        pred_list = list()
+        true_list = list()
+        for data in load:
+            inputs = data[0]
+            labels = data[1]
+            outputs = net(inputs)
+            _, predicted = torch.max(outputs.data, 1)
+            total += labels.size(0)
+            correct += (predicted == labels).sum().item()
+            pred_list += list(predicted.cpu().numpy())
+            true_list += list(labels.cpu().numpy())
+        acc = correct / total
+        eval_result.append(acc)
+        lcorrect.append(correct)
+        ltotal.append(total)
+        pred_result.append(pred_list)
+        true_result.append(true_list)
+    return (lcorrect, ltotal), pred_result, true_result
+
+
+def mcc(data):
+    pos_count = data[0][0]
+    neg_count = data[0][1]
+
+    tol_pos_count = data[1][0]
+    tol_neg_count = data[1][1]
+
+    TP = pos_count
+    FN = tol_pos_count - pos_count
+    TN = neg_count
+    FP = tol_neg_count - neg_count
+
+    precision = TP / (TP + FP)
+    recall = TP / (TP + FN)
+    MCC = (TP * TN - FP * FN) / math.sqrt((TP + FP) * (TP + FN) * (TN + FP) * (TN + FN))
+
+    return precision, recall, MCC
+
+
+def test(data_path, pretrain, ker=None):
+    if ker is None:
+        ker = [27, 14, 7]
+
+    dataloader = load_data_test(data_path, device=device)
+
+    net = GPlusD(ker)
+    net.to(device)
+
+    net.load_state_dict(torch.load(pretrain))
+
+    net.eval()
+    eval_data, results, true_results = evaluate(net, [dataloader])
+    
+    cm = confusion_matrix(true_results[0], results[0])
+
+    return results, cm
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "-d",
+        "--data",
+        type=str,
+        required=True,
+    )
+    parser.add_argument("-w", "--weight", type=str)
+    args = parser.parse_args()
+
+    output, cm = test(args.data, args.weight)
+    
+    ic(cm)
+
+    with open("infer_results.txt", "w") as f:
+        ic("Save the results to infer_results.txt")
+        for out in output[0]:
+            f.write(str(out) + "\n")
+
+train.py
+import argparse
+from pathlib import Path
+
+import torch
+import torch.optim as optim
+from torch import nn
+from icecream import ic
+
+from dataloader import load_dataset
+from models import GPlusD
+from test import evaluate, mcc
+
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+
+def train(data_path, pretrain=None, outputdir="test", training=True, ker=None, epoch_num=1000):
+    ker = ker or [27, 14, 7]
+
+    # Create experiment folders
+    exp_folder = Path(f"./output/{outputdir}")
+    exp_folder.mkdir(parents=True, exist_ok=True)
+
+    ic("Data loading")
+    train_pos, val_pos, test_pos, train_neg, val_neg, test_neg = load_dataset(data_path, device=device)
+
+    net = GPlusD(ker).to(device)
+    if pretrain:
+        net.load_state_dict(torch.load(pretrain))
+
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(net.parameters(), lr=0.00001)
+
+    best_mcc, best_precision, best_recall = 0, 0, 0
+    patience_counter = 0
+    patience_limit = 10  # Stops after 10 evaluation cycles without MCC improvement
+
+    if training:
+        ic("Start training")
+        for epoch in range(epoch_num):
+            net.train()
+            
+            for (batch_pos, batch_neg) in zip(train_pos, train_neg):
+                inputs = torch.cat((batch_pos[0], batch_neg[0]), dim=0)
+                labels = torch.cat((batch_pos[1], batch_neg[1]), dim=0).long()
+
+                optimizer.zero_grad()
+                outputs = net(inputs)
+                loss = criterion(outputs, labels)
+                loss.backward()
+                optimizer.step()
+
+            # Evaluation cycle every 10 epochs
+            if epoch % 10 == 0:
+                torch.save(net.state_dict(), exp_folder / f"epoch_{epoch}.pth")
+                
+                net.eval()
+                with torch.no_grad():
+                    eval_data, _ = evaluate(net, [val_pos, val_neg])
+                    precision, recall, MCC = mcc(eval_data)
+
+                ic(epoch, outputdir, precision, recall, MCC)
+
+                # Save best models
+                if precision > best_precision:
+                    best_precision = precision
+                    ic("Update best precision")
+                    torch.save(net.state_dict(), exp_folder / "best_precision.pth")
+                    
+                if recall > best_recall:
+                    best_recall = recall
+                    ic("Update best recall")
+                    torch.save(net.state_dict(), exp_folder / "best_recall.pth")
+                    
+                if MCC > best_mcc:
+                    best_mcc = MCC
+                    ic("Update best MCC")
+                    torch.save(net.state_dict(), exp_folder / "best_mcc.pth")
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
+
+                # Early stopping
+                if patience_counter >= patience_limit:
+                    ic("Early stopping triggered")
+                    break
+
+    # Final Testing Phase
+    ic("Start testing phase")
+    net.load_state_dict(torch.load(exp_folder / "best_mcc.pth"))
+    net.eval()
+    
+    with torch.no_grad():
+        eval_data, _ = evaluate(net, [test_pos, test_neg])
+        precision, recall, MCC = mcc(eval_data)
+
+    ic(precision, recall, MCC)
+
+    # Save test logs
+    with open(exp_folder / "log.txt", "w") as f:
+        f.write(f"Test precision: {precision}\nTest recall: {recall}\nTest MCC : {MCC}\n")
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-d", "--data", type=str, required=True, help="path to dataset(txt file)")
+    parser.add_argument("-o", "--outputdir", type=str, default="test", help="name of folder to save output in ./output")
+    parser.add_argument("-w", "--weight", type=str, help="Path to pre-train")
+    parser.add_argument("--test", action="store_true", help="Add this flag to do test only")
+    args = parser.parse_args()
+
+    train(
+        data_path=args.data, 
+        pretrain=args.weight, 
+        outputdir=args.outputdir, 
+        training=not args.test
+    )
+
+train_cnn_bilstm.py
+import argparse
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import TensorDataset, DataLoader
+from sklearn.model_selection import StratifiedKFold
+from sklearn.metrics import roc_auc_score, matthews_corrcoef
+from pathlib import Path
+
+class CNN_BiLSTM(nn.Module):
+    def __init__(self):
+        super(CNN_BiLSTM, self).__init__()
+        self.conv = nn.Conv1d(4, 128, 15)
+        self.relu = nn.ReLU()
+        self.pool = nn.MaxPool1d(5)
+        self.dropout1 = nn.Dropout(0.2)
+        self.lstm = nn.LSTM(128, 32, bidirectional=True, batch_first=True)
+        self.dropout2 = nn.Dropout(0.5)
+        self.fc = nn.Linear(64, 1)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        x = self.dropout1(self.pool(self.relu(self.conv(x))))
+        x = x.transpose(1, 2)
+        x, _ = self.lstm(x)
+        return self.sigmoid(self.fc(self.dropout2(x[:, -1, :]))).squeeze()
+
+def get_onehot_tensor(seqs):
+    mapping = {'A': [1,0,0,0], 'C': [0,1,0,0], 'G': [0,0,1,0], 'T': [0,0,0,1]}
+    tensors = [np.array([mapping.get(b, [0.25]*4) for b in s]).T for s in seqs]
+    return torch.tensor(np.array(tensors), dtype=torch.float32)
+
+def train_pytorch(data_path, neg_path, output_dir):
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    
+    with open(data_path, 'r') as f:
+        pos = [l.strip().upper() for l in f if len(l.strip()) == 81]
+    with open(neg_path, 'r') as f:
+        neg = [l.strip().upper() for l in f if len(l.strip()) == 81]
+        
+    X_tensor = get_onehot_tensor(pos + neg)
+    y = np.array([1]*len(pos) + [0]*len(neg))
+    
+    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+    best_mcc = -1
+    
+    for fold, (train_idx, val_idx) in enumerate(skf.split(np.zeros(len(y)), y), 1):
+        train_loader = DataLoader(TensorDataset(X_tensor[train_idx], torch.tensor(y[train_idx], dtype=torch.float32)), batch_size=64, shuffle=True)
+        model = CNN_BiLSTM()
+        optimizer = optim.AdamW(model.parameters(), lr=1e-3)
+        criterion = nn.BCELoss()
+        
+        model.train()
+        for epoch in range(20):
+            for bx, by in train_loader:
+                optimizer.zero_grad()
+                criterion(model(bx), by).backward()
+                optimizer.step()
+                
+        model.eval()
+        with torch.no_grad():
+            preds = model(X_tensor[val_idx]).numpy()
+        
+        mcc = matthews_corrcoef(y[val_idx], (preds >= 0.5).astype(int))
+        print(f"Fold {fold}: MCC = {mcc:.4f} | AUC = {roc_auc_score(y[val_idx], preds):.4f}")
+        
+        if mcc > best_mcc:
+            best_mcc = mcc
+            torch.save(model.state_dict(), Path(output_dir) / "best_model.pt")
+            print(f" -> Saved new best model (MCC: {mcc:.4f})")
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--pos", required=True)
+    parser.add_argument("--neg", required=True)
+    parser.add_argument("--out-dir", default="output")
+    args = parser.parse_args()
+    train_pytorch(args.pos, args.neg, args.out_dir)
+
+train_lgbm.py
+import argparse
+import joblib
+from pathlib import Path
+import lightgbm as lgb
+import numpy as np
+from sklearn.model_selection import StratifiedKFold
+from sklearn.metrics import precision_score, recall_score, matthews_corrcoef, roc_auc_score
+from dataset_builder import prepare_dataset
+
+def train_lightgbm(data_path, output_dir="output", k_size=3):
+    exp_folder = Path(f"{output_dir}")
+    exp_folder.mkdir(parents=True, exist_ok=True)
+
+    # 1. Prepare Data
+    df = prepare_dataset(data_path, k_size=k_size)
+    X = df.drop(columns=['label'])
+    y = df['label']
+    
+    print(f"Dataset prepared: {X.shape[0]} samples, {X.shape[1]} features.")
+
+    # 2. Setup Cross-Validation
+    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+    
+    params = {
+        'objective': 'binary',
+        'metric': 'auc',
+        'learning_rate': 0.05,
+        'max_depth': 6,
+        'num_leaves': 31,
+        'verbose': -1,
+        'random_state': 42
+    }
+
+    best_mcc = -1
+    fold_metrics = []
+
+    print("\nStarting 5-Fold Cross Validation...")
+    for fold, (train_idx, val_idx) in enumerate(skf.split(X, y), 1):
+        X_train, y_train = X.iloc[train_idx], y.iloc[train_idx]
+        X_val, y_val = X.iloc[val_idx], y.iloc[val_idx]
+        
+        train_data = lgb.Dataset(X_train, label=y_train)
+        val_data = lgb.Dataset(X_val, label=y_val, reference=train_data)
+        
+        model = lgb.train(
+            params, 
+            train_data, 
+            num_boost_round=300,
+            valid_sets=[val_data],
+            callbacks=[lgb.early_stopping(stopping_rounds=30, verbose=False)]
+        )
+        
+        # Evaluate Fold
+        val_preds_proba = model.predict(X_val)
+        val_preds = (val_preds_proba >= 0.5).astype(int)
+        
+        precision = precision_score(y_val, val_preds, zero_division=0)
+        recall = recall_score(y_val, val_preds, zero_division=0)
+        mcc = matthews_corrcoef(y_val, val_preds)
+        auc = roc_auc_score(y_val, val_preds_proba)
+        
+        print(f"Fold {fold}: AUC = {auc:.4f} | MCC = {mcc:.4f} | P = {precision:.4f} | R = {recall:.4f}")
+        fold_metrics.append({'auc': auc, 'mcc': mcc, 'precision': precision, 'recall': recall})
+        
+        # Save best model based on MCC
+        if mcc > best_mcc:
+            best_mcc = mcc
+            joblib.dump(model, exp_folder / "best_model.pkl")
+            # We also save the feature columns to ensure alignment during inference
+            joblib.dump(list(X.columns), exp_folder / "feature_columns.pkl")
+            print(f"  -> New best model saved (MCC: {mcc:.4f})")
+
+    # Log overall metrics
+    mean_mcc = np.mean([m['mcc'] for m in fold_metrics])
+    mean_auc = np.mean([m['auc'] for m in fold_metrics])
+    print(f"\nTraining Complete. Average AUC: {mean_auc:.4f} | Average MCC: {mean_mcc:.4f}")
+
+    with open(exp_folder / "log.txt", "w") as f:
+        f.write(f"5-Fold Cross Validation Results:\n")
+        f.write(f"Mean AUC: {mean_auc:.4f}\n")
+        f.write(f"Mean MCC: {mean_mcc:.4f}\n")
+        
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-d", "--data", type=str, required=True, help="path to dataset (txt file)")
+    parser.add_argument("-o", "--output-dir", type=str, default="test", help="output subfolder name")
+    parser.add_argument("-k", "--k-size", type=int, default=3, help="k-mer size for De Bruijn graph")
+    # parser.add_argument("-p", "--model-prefix", type=str, help="prefix for naming the model e.g gminus gplus")
+
+    args = parser.parse_args()
+
+    train_lightgbm(data_path=args.data, output_dir=args.output_dir, k_size=args.k_size)
+
+utils.py
+#adapted from deepromoter,
+import itertools
+import random
+
+import numpy as np
+
+
+def reader(filep):
+    with open(filep, "r") as f:
+        data = f.readlines()
+    data = [da.strip() for da in data]
+    return data
+
+
+def get_list_kmer(kmer, string="TGCA"):
+    string = list(string)
+    lkmer = ["".join(p) for p in itertools.product(string, repeat=kmer)]
+    lkmer.sort()
+    return lkmer
+
+
+def protein2num(protein, elements):
+    kmer = len(elements[0])
+    edict = dict()
+    for i, ele in enumerate(elements):
+        edict[ele] = i
+    token = list()
+    for i in range(len(protein)-kmer+1):
+        try:
+            token.append(edict[protein[i:i+kmer]])
+        except KeyError:
+            token.append(0)
+            print("Key error : ", protein[i:i+kmer], i)
+    return token
+
+
+def neggen(protein, num_part=20, keep=8, max_class=4):
+    length = len(protein)
+    # get part
+    part_len = length // num_part
+    if part_len * num_part < length:
+        num_part += 1
+
+    iterator = np.arange(num_part)
+    keep_parts = random.sample(list(iterator), k=keep)
+
+    outpro = list()
+    for it in iterator:
+        start = it * part_len
+        pro_part = protein[start:start + part_len]
+        if it in keep_parts:
+            outpro.extend(pro_part)
+        else:
+            pro_part = random.choices(np.arange(max_class), k=len(pro_part))
+            outpro.extend(pro_part)
+    return outpro
+
